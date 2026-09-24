@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Settings · Food diary{% endblock %}
+{% block header_actions %}<a class="button secondary" href="/">Back to diary</a>{% endblock %}
+{% block content %}
+<main id="main" class="settings-page">
+  <h1>Your diary, connected.</h1>
+  <p class="lede">Keep a copy, bring your entries over, or log a meal in ChatGPT.</p>
+  <section class="settings-section"><h2>Connect ChatGPT</h2><p>Add this MCP server to ChatGPT with OAuth authentication. Sign in with your diary password and approve the connection.</p><label for="mcp-url">Server URL</label><div class="copy-field"><input id="mcp-url" readonly value="{{ mcp_url }}"><button class="button secondary" id="copy-url" type="button">Copy</button></div><p class="small muted">The connection can read and update meals and daily notes. You can disconnect it here at any time.</p><button class="button secondary" id="disconnect" type="button">Disconnect all connections</button><p id="connection-status" role="status" class="small"></p></section>
+  <section class="settings-section"><h2>Export your diary</h2><p>Download meals, symptoms and notes as a JSON file you can import again.</p><form action="/export" method="get" class="export-form"><div><label for="export-start">From</label><input type="date" id="export-start" name="start" value="{{ export_start }}" required></div><div><label for="export-end">To</label><input type="date" id="export-end" name="end" value="{{ today }}" required></div><button class="button primary" type="submit">Download diary</button></form></section>
+  <section class="settings-section"><h2>Import entries</h2><p>Choose a Food diary JSON file. Existing meals and notes stay as they are.</p><form id="import-form"><label for="import-file">Diary file</label><input type="file" id="import-file" accept="application/json,.json" required><button class="button secondary" type="submit">Import diary</button><p id="import-status" role="status" class="small"></p></form></section>
+  <section class="settings-section"><h2>Session</h2><p class="muted">Dates and times use {{ timezone.replace('_', ' ') }}.</p><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button secondary" type="submit">Sign out</button></form></section>
+</main>
+{% endblock %}

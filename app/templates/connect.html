@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}Connect · Food diary{% endblock %}
+{% block content %}
+<main id="main" class="auth-page"><h1>Connect your diary?</h1><p class="lede">{{ client_name }} is asking to access your food diary.</p><p>This connection can read your meals and symptoms, and add or update meals and daily notes.</p><p class="muted small">Return address: {{ callback_host }}. Only continue if you started this connection.</p><form action="/oauth/consent" method="post" class="consent-actions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="pending" value="{{ pending }}"><button class="button primary" name="decision" value="allow" type="submit">Connect diary</button><button class="button secondary" name="decision" value="deny" type="submit">Cancel</button></form><p class="small muted">Disconnect any time from diary settings.</p></main>
+{% endblock %}

@@ -1,0 +1,12 @@
+.venv
+.git
+.env
+.env.*
+private
+artifacts
+tests
+__pycache__
+.pytest_cache
+*.db
+.impeccable
+

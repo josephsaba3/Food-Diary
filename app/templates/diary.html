@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ day.strftime('%d %B') }} · Food diary{% endblock %}
+{% block header_actions %}<a class="icon-button" href="/settings" aria-label="Diary settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></a>{% endblock %}
+{% block content %}
+<main id="main" class="diary-layout" data-day="{{ day.isoformat() }}">
+  <aside class="day-sidebar">
+    <div class="date-heading">
+      <h1>{{ 'Today' if day == today else day.strftime('%A') }}<span>{{ day.strftime('%d %B %Y').lstrip('0') }}</span></h1>
+      <p class="day-intro">What’s on your plate?</p>
+    </div>
+    <nav class="day-navigation" aria-label="Choose a diary date">
+      <a class="icon-button" href="/?date={{ previous }}" aria-label="Previous day"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></a>
+      <label class="date-control"><span class="sr-only">Diary date</span><input id="day-picker" type="date" value="{{ day }}" aria-label="Diary date"></label>
+      <a class="icon-button" href="/?date={{ following }}" aria-label="Next day"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg></a>
+    </nav>
+    {% if day != today %}<a class="today-link" href="/">Back to today</a>{% endif %}
+    <div class="sidebar-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/><circle cx="12" cy="12" r="4"/></svg><p>One meal at a time.<br>Add as much detail as you like.</p></div>
+  </aside>
+  <div class="diary-content">
+    <div class="section-heading"><h2>Meals</h2><span id="entry-count" class="small muted">{{ data.meals|length }} {{ 'entry' if data.meals|length == 1 else 'entries' }}</span></div>
+    <section class="meal-list" aria-label="Meals for {{ day }}">
+    {% for key, label in categories.items() %}
+      {% set meal = data.meals.get(key) %}
+      {% set suggestion = data.suggestions.get(key) %}
+      <article class="meal-row {{ 'has-entry' if meal else '' }}" id="meal-{{ key }}">
+        <button type="button" class="meal-open" data-edit="{{ key }}" aria-label="{{ 'Edit' if meal else 'Add' }} {{ label|lower }}" aria-describedby="food-{{ key }} time-{{ key }} symptoms-{{ key }}">
+          <span class="meal-marker" aria-hidden="true">{% if meal %}<svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>{% else %}<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>{% endif %}</span>
+          <span class="meal-main"><span class="meal-title">{{ label }}</span><span id="food-{{ key }}" class="meal-food {{ 'muted' if not meal else '' }}">{{ meal.food if meal else 'Add food & drink' }}</span>
+          <span class="symptom-preview" id="symptoms-{{ key }}" {% if not meal or not meal.symptoms %}hidden{% endif %}>{{ meal.symptoms if meal else '' }}</span></span>
+          <span class="meal-end"><span class="meal-time" id="time-{{ key }}">{% if meal and meal.time %}{{ meal.time }}{% endif %}</span><svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></span>
+        </button>
+        {% if suggestion and not meal %}<button class="import-suggestion" type="button" data-import="{{ key }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 10 4 5m0 0 5-1M4 5v5m0-5h9a7 7 0 0 1 0 14h-2"/></svg><span>{{ suggestion.label }}<span class="suggestion-food">{{ suggestion.food }}</span></span></button>{% endif %}
+      </article>
+    {% endfor %}
+    </section>
+    <section class="notes-section" aria-labelledby="notes-heading">
+      <div class="section-heading"><h2 id="notes-heading">Notes for the day</h2><span class="small muted">Optional</span></div>
+      <p class="muted notes-help">Anything else you noticed, including symptoms between meals.</p>
+      <form id="notes-form" data-version="{{ data.note.version }}">
+        <label for="day-notes" class="sr-only">Notes for the day</label>
+        <textarea id="day-notes" name="text" rows="3" maxlength="10000" placeholder="How did the day feel?">{{ data.note.text }}</textarea>
+        <div class="notes-actions"><span id="notes-status" class="small muted" role="status"></span><button class="button secondary" type="submit">Save notes</button></div>
+        <p class="error" id="notes-error" role="alert" hidden></p>
+      </form>
+    </section>
+    <footer class="diary-footer"><span>All times in {{ timezone.replace('_', ' ') }}</span><span>Food & feeling, day by day.</span></footer>
+  </div>
+</main>
+<dialog id="meal-dialog" aria-labelledby="editor-title">
+  <form id="meal-form">
+    <div class="dialog-heading"><div><h2 id="editor-title">Breakfast</h2><p id="editor-date" class="muted small">{{ day.strftime('%A, %d %B').replace(' 0', ' ') }}</p></div><button class="icon-button close-editor" type="button" aria-label="Close meal editor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+    <div class="dialog-body">
+      <div class="field"><label for="meal-time">Time <span class="optional">Optional</span></label><input id="meal-time" type="time" name="time"></div>
+      <div class="field"><label for="meal-food">What did you eat or drink?</label><textarea id="meal-food" name="food" rows="4" maxlength="5000" required placeholder="Food, drinks, and any details you’d like to keep"></textarea><button type="button" class="editor-import" id="editor-import" hidden></button><p class="small muted" id="import-feedback" role="status" hidden>Food copied. Add today’s time and symptoms, then save.</p></div>
+      <fieldset class="symptom-fieldset"><legend>Symptoms</legend><div class="symptom-options"><label><input type="radio" name="symptom_status" value="unrecorded" checked><span>Not recorded</span></label><label><input type="radio" name="symptom_status" value="none"><span>No symptoms</span></label><label><input type="radio" name="symptom_status" value="reported"><span>Add symptoms</span></label></div></fieldset>
+      <div class="field" id="symptoms-field" hidden><label for="meal-symptoms">What did you notice?</label><textarea id="meal-symptoms" name="symptoms" rows="3" maxlength="5000" placeholder="Include when it started, if you know"></textarea></div>
+      <p class="error" id="meal-error" role="alert" hidden></p>
+    </div>
+    <div class="dialog-actions"><button type="button" class="button danger" id="delete-meal" hidden>Delete</button><button type="button" class="button secondary close-editor" id="cancel-meal">Cancel</button><button class="button primary save-meal" type="submit">Save meal <span aria-hidden="true">✓</span></button></div>
+  </form>
+</dialog>
+<noscript><p class="noscript">Please enable JavaScript to add and edit diary entries.</p></noscript>
+{% endblock %}
