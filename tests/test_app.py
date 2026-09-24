@@ -193,7 +193,7 @@ def test_persistence_new_app_instance_and_config_guard(client, app, monkeypatch)
     monkeypatch.setenv("APP_PASSWORD", "p" * 16)
     monkeypatch.setenv("SESSION_SECRET", "s" * 40)
     monkeypatch.setenv("BASE_URL", "http://localhost:8000")
-    with pytest.raises(RuntimeError, match="Production requires"):
+    with pytest.raises(RuntimeError, match="DATABASE_URL must resolve to a PostgreSQL"):
         Settings.from_env()
 
 
