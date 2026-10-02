@@ -72,25 +72,26 @@ def run():
             page.wait_for_selector("dialog[open]")
             assert page.get_by_label("What did you eat or drink?").input_value() == "Mushroom risotto"
             assert page.locator("#meal-time").input_value() == ""
-            assert page.get_by_role("radio", name="PM", exact=True).is_checked()
             assert page.get_by_role("radio", name="Not recorded").is_checked()
             assert page.locator("#meal-symptoms").input_value() == ""
             page.evaluate("async () => { await Promise.all(document.getAnimations().map(a => a.finished)); }")
             page.evaluate("document.fonts.ready")
             page.screenshot(path=str(artifacts / "mobile-editor.png"))
-            page.get_by_label("Hour").select_option("12")
-            page.get_by_label("Minutes").select_option("30")
+            page.get_by_label("Time Optional").click()
+            assert page.locator("#meal-time").input_value() == "12:30"  # Lunch opens the picker on PM.
+            page.get_by_label("Time Optional").fill("12:45")
             page.get_by_role("radio", name="No symptoms", exact=True).check()
             page.get_by_role("button", name="Save meal").click()
             page.wait_for_selector("dialog[open]", state="hidden")
             page.reload()
             assert "Mushroom risotto" in page.locator("#meal-lunch").inner_text()
-            assert "12:30" in page.locator("#meal-lunch").inner_text()
+            assert "12:45" in page.locator("#meal-lunch").inner_text()
             assert "Bloating" not in page.locator("#meal-lunch").inner_text()
-            expect(page.get_by_role("button", name="Edit lunch", exact=True)).to_have_accessible_description(re.compile("Mushroom risotto.*12:30"))
+            expect(page.get_by_role("button", name="Edit lunch", exact=True)).to_have_accessible_description(re.compile("Mushroom risotto.*12:45"))
             # An actual failed save must leave the draft open and readable.
             page.get_by_role("button", name="Add breakfast", exact=True).click()
-            assert page.get_by_role("radio", name="AM", exact=True).is_checked()
+            page.get_by_label("Time Optional").click()
+            assert page.locator("#meal-time").input_value() == "08:00"  # Breakfast opens the picker on AM.
             page.get_by_label("What did you eat or drink?").fill("Oats and coffee")
             page.route("**/api/days/*/meals/*", lambda route: route.abort())
             page.get_by_role("button", name="Save meal").click()
@@ -101,7 +102,7 @@ def run():
             page.route("**/api/days/*/meals/*", lambda route: pending.append(route))
             page.get_by_role("button", name="Save meal").click()
             expect(page.locator("#meal-food")).to_be_disabled()
-            expect(page.locator("#meal-hour")).to_be_disabled()
+            expect(page.locator("#meal-time")).to_be_disabled()
             expect(page.get_by_role("radio", name="Not recorded")).to_be_disabled()
             assert pending
             pending.pop().continue_()
