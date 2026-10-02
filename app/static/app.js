@@ -34,24 +34,12 @@ if (diary) {
   const categories = {breakfast:"Breakfast",mid_morning_snack:"Mid morning snack",lunch:"Lunch",mid_afternoon_snack:"Mid afternoon snack",dinner:"Dinner",evening_snack:"Evening snack"};
   let data = null, category = null, original = "", notesOriginal = $("#day-notes").value, loading = false, saving = false;
   let notesVersion = Number($("#notes-form").dataset.version);
-  // Morning meals start on AM; the rest start on PM, so only hour and minutes need picking.
-  const morning = new Set(["breakfast", "mid_morning_snack"]);
-  function formFields() { const fields = Object.fromEntries(new FormData(form)); delete fields.meridiem; return fields; }
-  function snapshot() { return JSON.stringify(formFields()); }
-  function setTime(value, key) {
-    const [hours, minutes] = value ? value.split(":").map(Number) : [];
-    $("#meal-hour").value = value ? String(hours % 12 || 12) : "";
-    $("#meal-minute").value = value ? String(minutes).padStart(2, "0") : "";
-    form.elements.meridiem.value = value ? (hours < 12 ? "AM" : "PM") : (morning.has(key) ? "AM" : "PM");
-    $("#meal-time").value = value || "";
-  }
-  function syncTime() {
-    const hour = $("#meal-hour").value;
-    if (hour && !$("#meal-minute").value) $("#meal-minute").value = "00";
-    const hours = hour ? Number(hour) % 12 + (form.elements.meridiem.value === "PM" ? 12 : 0) : null;
-    $("#meal-time").value = hour ? `${String(hours).padStart(2, "0")}:${$("#meal-minute").value}` : "";
-  }
-  [$("#meal-hour"), $("#meal-minute"), ...form.elements.meridiem].forEach(control => control.addEventListener("change", syncTime));
+  // An empty time picker opens on the current time, so seed a typical time for the meal instead;
+  // morning meals then open on AM and the rest on PM.
+  const typicalTimes = {breakfast:"08:00",mid_morning_snack:"10:30",lunch:"12:30",mid_afternoon_snack:"15:30",dinner:"18:30",evening_snack:"20:30"};
+  function snapshot() { return JSON.stringify(Object.fromEntries(new FormData(form))); }
+  function seedTime() { if (!$("#meal-time").value && category) $("#meal-time").value = typicalTimes[category]; }
+  ["pointerdown", "focus"].forEach(type => $("#meal-time").addEventListener(type, seedTime));
   function dirty() { return dialog.open && snapshot() !== original; }
   const initialLoad = api(`/api/days/${day}`).then(result => { data = result; }).catch(error => { toast(error.message); });
   function statusField() {
@@ -78,7 +66,7 @@ if (diary) {
       const meal = data.meals[key];
       $("#editor-title").textContent = categories[key];
       $("#meal-food").value = meal?.food || "";
-      setTime(meal?.time, key);
+      $("#meal-time").value = meal?.time || "";
       $("#meal-symptoms").value = meal?.symptoms || "";
       form.elements.symptom_status.value = meal?.symptom_status || "unrecorded";
       $("#meal-error").hidden = true;
@@ -137,12 +125,12 @@ if (diary) {
   }
   function busy(value) {
     saving = value;
-    form.querySelectorAll("button, input, select, textarea").forEach(control => control.disabled = value);
+    form.querySelectorAll("button, input, textarea").forEach(control => control.disabled = value);
     $(".save-meal").textContent = value ? "Saving…" : "Save meal";
   }
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (saving) return;
-    const fields = formFields();
+    const fields = Object.fromEntries(new FormData(form));
     const payload = {...fields, time: fields.time || null, expected_version: data.meals[category]?.version || 0};
     $("#meal-error").hidden = true; busy(true);
     try {
