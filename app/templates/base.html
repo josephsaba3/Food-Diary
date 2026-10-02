@@ -8,8 +8,8 @@
   <meta name="csrf-token" content="{{ csrf }}">
   <title>{% block title %}Food diary{% endblock %}</title>
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="{{ asset['app.css'] }}">
+  <script src="{{ asset['app.js'] }}" defer></script>
 </head>
 <body>
   <a href="#main" class="skip-link">Skip to diary</a>

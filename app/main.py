@@ -1,3 +1,4 @@
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -33,6 +34,9 @@ def create_app(settings=None):
     sessions = session_factory(engine)
     security = Security(settings)
     templates = Jinja2Templates(directory=ROOT / "templates")
+    # Version asset URLs by content so phones never pair a fresh page with stale CSS or JS.
+    templates.env.globals["asset"] = {name: f"/static/{name}?v={hashlib.sha256((ROOT / 'static' / name).read_bytes()).hexdigest()[:12]}"
+                                      for name in ("app.css", "app.js")}
     oauth = OAuth(settings, sessions, security, templates)
     mcp = build_mcp(settings, sessions)
     mcp_app = mcp.streamable_http_app()
