@@ -200,3 +200,5 @@ $("#import-form")?.addEventListener("submit", async event => {
   } catch (error) { $("#import-status").textContent = error.message; }
   finally { button.disabled = false; }
 });
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
