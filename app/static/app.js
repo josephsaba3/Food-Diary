@@ -69,7 +69,7 @@ if (diary) {
     if (loading) return;
     loading = true;
     try {
-      // Read afresh so ChatGPT edits appear before the form is opened.
+      // Read afresh so Claude edits appear before the form is opened.
       const latest = await api(`/api/days/${day}`);
       if (data) { data.meals = latest.meals; data.suggestions = latest.suggestions; }
       else data = latest;
@@ -184,7 +184,7 @@ $("#copy-url")?.addEventListener("click", async () => {
   catch { $("#mcp-url").select(); toast("Select and copy the server URL"); }
 });
 $("#disconnect")?.addEventListener("click", async event => {
-  if (!confirm("Disconnect all ChatGPT and MCP connections? You can connect again later.")) return;
+  if (!confirm("Disconnect all Claude and MCP connections? You can connect again later.")) return;
   event.target.disabled = true;
   try { await api("/api/disconnect",{method:"POST"}); $("#connection-status").textContent = "All connections disconnected."; }
   catch (error) { $("#connection-status").textContent = error.message; }

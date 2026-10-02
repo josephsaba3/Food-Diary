@@ -65,7 +65,7 @@ def create_app(settings=None):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        callback_origins = {"https://chatgpt.com"}
+        callback_origins = {"https://claude.ai", "https://claude.com"}
         callback_origins.update(f"{urlparse(uri).scheme}://{urlparse(uri).netloc}" for uri in settings.extra_redirect_uris)
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' " + " ".join(sorted(callback_origins))
         if not request.url.path.startswith("/static/"):

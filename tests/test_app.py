@@ -124,8 +124,8 @@ def test_import_is_atomic_and_preserves_existing(client):
 
 
 def oauth_grant(client):
-    redirect = "https://chatgpt.com/connector_platform_oauth_redirect"
-    reg = client.post("/oauth/register", json={"redirect_uris": [redirect], "client_name": "ChatGPT", "token_endpoint_auth_method": "none"})
+    redirect = "https://claude.ai/api/mcp/auth_callback"
+    reg = client.post("/oauth/register", json={"redirect_uris": [redirect], "client_name": "Claude", "token_endpoint_auth_method": "none"})
     assert reg.status_code == 201
     client_id = reg.json()["client_id"]
     verifier = "v" * 64
@@ -160,7 +160,8 @@ def test_oauth_pkce_single_use_refresh_and_disconnect(client):
 
 def test_oauth_rejects_bad_callbacks_pkce_resource_and_denial(client):
     assert client.post("/oauth/register", json={"redirect_uris": ["https://evil.example/callback"]}).status_code == 400
-    assert client.post("/oauth/register", json={"redirect_uris": ["https://chatgpt.com.evil.example/connector_platform_oauth_redirect"]}).status_code == 400
+    assert client.post("/oauth/register", json={"redirect_uris": ["https://claude.ai.evil.example/api/mcp/auth_callback"]}).status_code == 400
+    assert client.post("/oauth/register", json={"redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"]}).status_code == 400
     data = oauth_grant(client)
     data["code_verifier"] = "incorrect" * 8
     assert client.post("/oauth/token", data=data).json()["error"] == "invalid_grant"
@@ -218,3 +219,28 @@ def test_mcp_protocol_and_real_tools_share_ui_database(client):
     assert stale["result"]["isError"]
     read = rpc("tools/call", {"name": "get_diary_day", "arguments": {"day": "2026-09-24"}})
     assert not read["result"].get("isError")
+
+
+def test_existing_chatgpt_connections_are_cut_off(client, app):
+    oauth = app.state.oauth
+    oauth.put("client", "old-chatgpt", {"client_id": "old-chatgpt", "client_name": "ChatGPT",
+              "redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"]}, 3600)
+    with oauth.sessions.begin() as db:
+        tokens = oauth.issue(db, "old-chatgpt", oauth.resource)
+    assert client.post("/mcp", headers={"Authorization": "Bearer " + tokens["access_token"]}, json={}).status_code == 401
+    refresh = {"grant_type": "refresh_token", "client_id": "old-chatgpt", "resource": oauth.resource, "refresh_token": tokens["refresh_token"]}
+    assert client.post("/oauth/token", data=refresh).json()["error"] == "invalid_client"
+
+
+def test_claude_can_omit_resource(client):
+    data = oauth_grant(client)
+    del data["resource"]
+    assert client.post("/oauth/token", data=data).status_code == 200
+
+
+def test_claude_token_reaches_mcp(client):
+    tokens = client.post("/oauth/token", data=oauth_grant(client)).json()
+    response = client.post("/mcp", headers={"Authorization": "Bearer " + tokens["access_token"], "Accept": "application/json, text/event-stream"},
+                           json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response.status_code == 200, response.text
+    assert any(tool["name"] == "get_diary_day" for tool in response.json()["result"]["tools"])

@@ -107,7 +107,7 @@ def run():
             pending.pop().continue_()
             page.wait_for_selector("dialog[open]", state="hidden")
             page.unroute("**/api/days/*/meals/*")
-            # Stale notes must not overwrite notes added by ChatGPT after the render.
+            # Stale notes must not overwrite notes added by Claude after the render.
             token = page.locator('meta[name="csrf-token"]').get_attribute("content")
             page.request.put(origin + "/api/days/2026-09-24/notes", data={"text": "Newer note from another device", "expected_version": 0}, headers={"X-CSRF-Token": token})
             page.get_by_role("textbox", name="Notes for the day", exact=True).fill("A stale browser note")
