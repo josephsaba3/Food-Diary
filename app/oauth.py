@@ -19,6 +19,8 @@ from sqlalchemy import delete, select
 from .models import AuthRecord
 
 SCOPE = "diary"
+# Claude web, desktop and mobile all return through this callback; claude.com is its announced successor.
+CLAUDE_CALLBACKS = ("https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback")
 
 
 def token_key(value):
@@ -58,12 +60,17 @@ class OAuth:
             return False
         if value in self.settings.extra_redirect_uris:
             return parsed.scheme == "https" or (not self.settings.production and parsed.hostname in ("localhost", "127.0.0.1"))
-        return value == "https://chatgpt.com/connector_platform_oauth_redirect" or bool(
-            re.fullmatch(r"https://chatgpt\.com/aip/[a-zA-Z0-9_-]+/oauth/callback", value))
+        return value in CLAUDE_CALLBACKS
+
+    def client(self, client_id):
+        # Clients registered for a callback that is no longer trusted (such as ChatGPT) lose access.
+        client = self.get("client", client_id)
+        return client if client and all(self.allowed_redirect(uri) for uri in client["redirect_uris"]) else None
 
     def access_valid(self, token):
         data = self.get("access", token)
-        return bool(data and data.get("resource") == self.resource and data.get("stamp") == self.security.stamp)
+        return bool(data and data.get("resource") == self.resource and data.get("stamp") == self.security.stamp
+                    and self.client(data.get("client_id", "")))
 
     def issue(self, db, client_id, resource):
         access, refresh = secrets.token_urlsafe(48), secrets.token_urlsafe(48)
@@ -100,7 +107,7 @@ class OAuth:
                     or body.get("token_endpoint_auth_method", "none") != "none"):
                 return JSONResponse({"error": "invalid_client_metadata", "error_description": "Use an allowed callback and public-client PKCE (token_endpoint_auth_method: none)."}, status_code=400)
             client = secrets.token_urlsafe(32)
-            record = {"client_id": client, "client_name": str(body.get("client_name", "ChatGPT"))[:100],
+            record = {"client_id": client, "client_name": str(body.get("client_name", "Claude"))[:100],
                       "redirect_uris": redirects, "token_endpoint_auth_method": "none",
                       "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "scope": SCOPE}
             self.put("client", client, record, 365 * 86400)
@@ -109,7 +116,8 @@ class OAuth:
         @app.get("/oauth/authorize")
         def authorize(request: Request):
             params = dict(request.query_params)
-            client = self.get("client", params.get("client_id", ""))
+            client = self.client(params.get("client_id", ""))
+            params.setdefault("resource", self.resource)
             redirect = params.get("redirect_uri", "")
             # Never redirect errors to an unvalidated URL.
             if not client or redirect not in client["redirect_uris"] or not self.allowed_redirect(redirect):
@@ -138,7 +146,7 @@ class OAuth:
             with self.sessions.begin() as db:
                 params = self.consume(db, "pending", str(form.get("pending", "")))
                 if not params or not hmac.compare_digest(params["csrf_binding"], self.security.csrf(request)):
-                    raise HTTPException(400, "Connection request expired. Start again from ChatGPT.")
+                    raise HTTPException(400, "Connection request expired. Start again from Claude.")
                 if form.get("decision") != "allow":
                     return self.callback(params, error="access_denied")
                 code = secrets.token_urlsafe(48)
@@ -150,9 +158,9 @@ class OAuth:
             self.security.rate_limit(request, "token", limit=120)
             form = await request.form()
             client_id = str(form.get("client_id", ""))
-            if not self.get("client", client_id):
+            if not self.client(client_id):
                 return JSONResponse({"error": "invalid_client"}, status_code=400)
-            resource = str(form.get("resource", ""))
+            resource = str(form.get("resource") or self.resource)
             if resource != self.resource:
                 return JSONResponse({"error": "invalid_target"}, status_code=400)
             with self.sessions.begin() as db:

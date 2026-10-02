@@ -43,7 +43,7 @@ def save_meal(session, day, category, data: MealInput):
             result = session.execute(update(Meal).where(Meal.day == day, Meal.category == category,
                 Meal.version == data.expected_version).values(**values, version=data.expected_version + 1))
             if result.rowcount != 1:
-                raise ConflictError("This meal changed in another tab or in ChatGPT. Reload it before saving.")
+                raise ConflictError("This meal changed in another tab or in Claude. Reload it before saving.")
         session.commit()
     except IntegrityError as exc:
         session.rollback()

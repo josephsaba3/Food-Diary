@@ -4,7 +4,7 @@ A small, mobile-first, single-person diary built with FastAPI, server-rendered H
 
 The six daily meal slots hold a time, food/drink description and symptoms. Breakfast suggests yesterday's breakfast; lunch and dinner suggest yesterday's dinner. Importing opens an editable food-only draft. Time and symptoms belong to the new meal and are never copied. Snack slots remain manual.
 
-Missing symptoms and an explicit report of no symptoms are stored separately. Daily notes hold symptoms between meals. Saves have version checks so a stale phone tab cannot overwrite a newer ChatGPT change. There is one entry per category per date; edit it to add more detail.
+Missing symptoms and an explicit report of no symptoms are stored separately. Daily notes hold symptoms between meals. Saves have version checks so a stale phone tab cannot overwrite a newer Claude change. There is one entry per category per date; edit it to add more detail.
 
 ## Run locally
 
@@ -44,13 +44,13 @@ The pre-deploy command runs `alembic upgrade head`; it never seeds diary entries
 
 Deployment follows the [Railway FastAPI guide](https://docs.railway.com/guides/fastapi) and [FastAPI container guidance](https://fastapi.tiangolo.com/deployment/docker/). This repository is prepared for deployment; it does not itself create or modify a Railway project.
 
-## Connect ChatGPT
+## Connect Claude
 
 The remote MCP endpoint is **`https://YOUR-DOMAIN/mcp`**, using Streamable HTTP and OAuth authorization-code + PKCE. The app includes its own single-owner authorization server, a consent screen, discovery metadata, dynamic client registration, short-lived access tokens and rotating refresh tokens. Read/write access requires signing in with your diary password. A normal browser session alone cannot call MCP.
 
-In a ChatGPT account with developer-mode/custom-MCP access, add the server URL with OAuth authentication. Use dynamic registration (no manually supplied client ID or secret). You will be sent to this diary's login/consent screen. Approve it, then test a request such as “What did I eat yesterday?” or “Record breakfast today at 8 am: oats and coffee. No symptoms.” Account access and the exact settings UI depend on your ChatGPT plan/workspace. See [OpenAI's connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt) and [OAuth requirements](https://developers.openai.com/plugins/build/auth).
+In Claude (web, desktop or mobile), open Settings → Connectors → Add custom connector and paste the server URL. Leave the OAuth client ID and secret blank; Claude registers itself dynamically. You will be sent to this diary's login/consent screen. Approve it, then test a request such as “What did I eat yesterday?” or “Record breakfast today at 8 am: oats and coffee. No symptoms.” See [Claude's connector authentication guide](https://claude.com/docs/connectors/building/authentication).
 
-The registered callback must be the official stable ChatGPT callback `https://chatgpt.com/connector_platform_oauth_redirect`, or a ChatGPT `/aip/<id>/oauth/callback` URL. For another MCP client, explicitly add its exact callback to `OAUTH_REDIRECT_URIS` (comma-separated). No wildcard callbacks or arbitrary redirect hosts are accepted. Local HTTP callbacks are accepted only for explicitly configured localhost URLs in development. Keep `BASE_URL` accurate: it is the OAuth issuer and the basis of the protected resource identifier. Tokens for another resource are rejected.
+The registered callback must be Claude's `https://claude.ai/api/mcp/auth_callback` (or its announced successor `https://claude.com/api/mcp/auth_callback`). ChatGPT callbacks are no longer accepted, and clients registered with them lose access. For another MCP client, explicitly add its exact callback to `OAUTH_REDIRECT_URIS` (comma-separated). No wildcard callbacks or arbitrary redirect hosts are accepted. Local HTTP callbacks are accepted only for explicitly configured localhost URLs in development. Keep `BASE_URL` accurate: it is the OAuth issuer and the basis of the protected resource identifier. Tokens for another resource are rejected.
 
 Available tools:
 
@@ -60,7 +60,7 @@ Available tools:
 - `save_diary_meal`: create or replace a complete meal with `expected_version` (0 for new).
 - `save_diary_notes`: create or replace notes with `expected_version`.
 
-The write tools explicitly require reading existing data first and retaining the user's details. They do not infer symptoms, severity or causal relationships. Deleting meals is available in the diary UI; no deletion tool is exposed to ChatGPT. Use Settings → Disconnect all connections to revoke all MCP access. Changing the app password also invalidates existing login sessions and access/refresh tokens.
+The write tools explicitly require reading existing data first and retaining the user's details. They do not infer symptoms, severity or causal relationships. Deleting meals is available in the diary UI; no deletion tool is exposed to Claude. Use Settings → Disconnect all connections to revoke all MCP access. Changing the app password also invalidates existing login sessions and access/refresh tokens.
 
 ## Import the supplied diary
 
@@ -77,4 +77,4 @@ Private source files are intentionally excluded from Git and Docker. Upload the 
 
 Tests cover database migrations, authentication, CSRF, validation, save conflicts, import rules, JSON round trips, OAuth/PKCE replay protection, refresh rotation, revocation, and real MCP JSON-RPC calls sharing the UI database. `tests/browser_check.py` exercises the mobile UI against an isolated temporary database and saves desktop/mobile screenshots under `artifacts/`.
 
-The app requires an internet connection to save. Failed saves keep the open form, but unsaved drafts are not stored offline. Browser navigation warns about unsaved changes. This is a personal diary, with no multi-user accounts, nutritional analysis, medical interpretation or Word-template exporter. Railway PostgreSQL and the final ChatGPT account connection need a live deployment to verify; local tests do not imply either has been deployed.
+The app requires an internet connection to save. Failed saves keep the open form, but unsaved drafts are not stored offline. Browser navigation warns about unsaved changes. This is a personal diary, with no multi-user accounts, nutritional analysis, medical interpretation or Word-template exporter. Railway PostgreSQL and the final Claude account connection need a live deployment to verify; local tests do not imply either has been deployed.
