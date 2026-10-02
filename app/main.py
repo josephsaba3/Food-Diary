@@ -196,6 +196,11 @@ def create_app(settings=None):
         return {"disconnected": True}
 
     oauth.install(app)
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker():
+        # Served from the root so the worker can cover the whole app.
+        return Response((ROOT / "static" / "sw.js").read_bytes(), media_type="text/javascript")
+
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
     # Last mount: SDK serves the canonical /mcp path without a trailing slash redirect.
     app.mount("/", MCPAuthorization(mcp_app, oauth))
