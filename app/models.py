@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Date, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Date, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -40,3 +40,33 @@ class AuthRecord(Base):
     payload: Mapped[str] = mapped_column(Text)
     expires_at: Mapped[int] = mapped_column(index=True)
 
+
+
+class GarminAccount(Base):
+    """The single linked Garmin account: Personal API key and current bearer token, both Fernet-encrypted."""
+    __tablename__ = "garmin_account"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    api_key: Mapped[str] = mapped_column(Text)
+    access_token: Mapped[str | None] = mapped_column(Text)
+    token_expires_at: Mapped[int | None] = mapped_column(BigInteger)
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str] = mapped_column(Text, default="")
+
+
+class HealthDay(Base):
+    """One summarised Garmin day (steps, sleep, heart rate, Body Battery, stress, HRV...) as JSON."""
+    __tablename__ = "health_days"
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    summary: Mapped[str] = mapped_column(Text)
+    # Trimmed Garmin responses, kept so fields the summary doesn't map are still readable.
+    raw: Mapped[str] = mapped_column(Text, default="{}")
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class HealthActivity(Base):
+    __tablename__ = "health_activities"
+    activity_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

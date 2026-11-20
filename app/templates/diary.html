@@ -33,6 +33,34 @@
       </article>
     {% endfor %}
     </section>
+    {% set h = health.summary %}
+    <section class="health-section" aria-labelledby="health-heading" id="health">
+      <div class="section-heading"><h2 id="health-heading">From your Garmin</h2>
+        {% if garmin_connected %}<button class="button secondary compact" type="button" id="garmin-sync" data-day="{{ day.isoformat() }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-3M4 13a8 8 0 0 0 14.9 3M5 3v5h5m9 13v-5h-5"/></svg>Sync</button>{% endif %}</div>
+      {% if not garmin_connected and not health.synced %}
+      <p class="muted health-empty">Link your Garmin in <a href="/settings#garmin">Settings</a> to see sleep, steps, heart rate and Body Battery beside your meals.</p>
+      {% elif not health.synced %}
+      <p class="muted health-empty">Nothing synced for this day yet.</p>
+      {% else %}
+      <dl class="health-grid">
+        {% if h.sleep %}<div class="health-tile"><dt>Sleep</dt><dd>{{ h.sleep.total_minutes|hm if h.sleep.total_minutes is defined else '—' }}</dd><span>{% if h.sleep.score is defined %}Score {{ h.sleep.score }}{% if h.sleep.quality %} · {{ h.sleep.quality|label }}{% endif %}{% endif %}{% if h.sleep.start and h.sleep.end %}<br>{{ h.sleep.start[11:] }}–{{ h.sleep.end[11:] }}{% endif %}</span></div>{% endif %}
+        {% if h.steps %}<div class="health-tile"><dt>Steps</dt><dd>{{ '{:,}'.format(h.steps.total or 0) }}</dd><span>{% if h.steps.goal %}Goal {{ '{:,}'.format(h.steps.goal) }}{% endif %}{% if h.steps.distance_km %} · {{ h.steps.distance_km }} km{% endif %}</span></div>{% endif %}
+        {% if h.body_battery %}<div class="health-tile"><dt>Body Battery</dt><dd>{{ h.body_battery.highest if h.body_battery.highest is defined else '—' }}<small> high</small></dd><span>{% if h.body_battery.lowest is defined %}Low {{ h.body_battery.lowest }}{% endif %}{% if h.body_battery.charged is defined %} · +{{ h.body_battery.charged }}{% endif %}{% if h.body_battery.drained is defined %} / −{{ h.body_battery.drained }}{% endif %}</span></div>{% endif %}
+        {% if h.heart_rate %}<div class="health-tile"><dt>Resting heart rate</dt><dd>{{ h.heart_rate.resting if h.heart_rate.resting is defined else '—' }}<small> bpm</small></dd><span>{% if h.heart_rate.min is defined %}Range {{ h.heart_rate.min }}–{{ h.heart_rate.max }}{% endif %}</span></div>{% endif %}
+        {% if h.stress and h.stress.average is defined %}<div class="health-tile"><dt>Stress</dt><dd>{{ h.stress.average }}<small> avg</small></dd><span>{% if h.stress.high_minutes %}{{ h.stress.high_minutes|hm }} high{% endif %}</span></div>{% endif %}
+        {% if h.hrv %}<div class="health-tile"><dt>Overnight HRV</dt><dd>{{ h.hrv.last_night_avg if h.hrv.last_night_avg is defined else '—' }}<small> ms</small></dd><span>{{ h.hrv.status|label }}</span></div>{% endif %}
+        {% if h.intensity_minutes %}<div class="health-tile"><dt>Intensity minutes</dt><dd>{{ (h.intensity_minutes.moderate or 0) + 2 * (h.intensity_minutes.vigorous or 0) }}</dd><span>{{ h.intensity_minutes.moderate or 0 }} moderate · {{ h.intensity_minutes.vigorous or 0 }} vigorous</span></div>{% endif %}
+        {% if h.training_readiness %}<div class="health-tile"><dt>Training readiness</dt><dd>{{ h.training_readiness.score if h.training_readiness.score is defined else '—' }}</dd><span>{{ h.training_readiness.level|label }}</span></div>{% endif %}
+        {% if h.calories %}<div class="health-tile"><dt>Calories burned</dt><dd>{{ '{:,}'.format((h.calories.total or 0)|int) }}</dd><span>{% if h.calories.active is defined %}{{ h.calories.active|int }} active{% endif %}</span></div>{% endif %}
+      </dl>
+      {% endif %}
+      {% if health.activities %}
+      <ul class="activity-list" aria-label="Workouts">
+        {% for a in health.activities %}<li><span class="activity-name">{{ a.name or a.type|label }}</span><span class="small muted">{% if a.start %}{{ a.start[11:] }} · {% endif %}{% if a.duration_minutes %}{{ a.duration_minutes|hm }}{% endif %}{% if a.distance_km %} · {{ a.distance_km }} km{% endif %}{% if a.pace %} · {{ a.pace }}{% endif %}{% if a.avg_hr %} · {{ a.avg_hr }} bpm avg{% endif %}{% if a.calories %} · {{ a.calories }} kcal{% endif %}</span></li>{% endfor %}
+      </ul>
+      {% endif %}
+      {% if health.synced %}<p class="small muted health-synced">Synced {{ health.synced_at|localtime }}</p>{% endif %}
+    </section>
     <section class="notes-section" aria-labelledby="notes-heading">
       <div class="section-heading"><h2 id="notes-heading">Notes for the day</h2><span class="small muted">Optional</span></div>
       <p class="muted notes-help">Anything else you noticed, including symptoms between meals.</p>

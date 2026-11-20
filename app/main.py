@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -15,20 +17,22 @@ from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import diary
+from . import diary, garmin
 from .config import Settings
 from .database import make_engine, session_factory
 from .importing import ImportBundle, import_bundle
+from .garmin import GarminError, GarminLink
 from .mcp_server import build_mcp
 from .models import AuthRecord
 from .oauth import MCPAuthorization, OAuth
-from .schemas import CATEGORIES, Category, MealInput, NoteInput
+from .schemas import CATEGORIES, Category, GarminKey, GarminSync, MealInput, NoteInput
 from .security import Security, local_next
 
 ROOT = Path(__file__).parent
+log = logging.getLogger("food_diary.garmin")
 
 
-def create_app(settings=None):
+def create_app(settings=None, garmin_http=None):
     settings = settings or Settings.from_env()
     engine = make_engine(settings.database_url)
     sessions = session_factory(engine)
@@ -38,17 +42,36 @@ def create_app(settings=None):
     templates.env.globals["asset"] = {name: f"/static/{name}?v={hashlib.sha256((ROOT / 'static' / name).read_bytes()).hexdigest()[:12]}"
                                       for name in ("app.css", "app.js")}
     oauth = OAuth(settings, sessions, security, templates)
-    mcp = build_mcp(settings, sessions)
+    link = GarminLink(settings, sessions, garmin_http)
+    templates.env.filters["hm"] = lambda minutes: f"{int(minutes) // 60}h {int(minutes) % 60:02d}m" if minutes is not None else ""
+    templates.env.filters["localtime"] = lambda iso: datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.timezone)).strftime("%d %b, %-I:%M %p").lstrip("0") if iso else ""
+    templates.env.filters["label"] = lambda value: str(value or "").replace("_", " ").capitalize()
+    mcp = build_mcp(settings, sessions, link)
     mcp_app = mcp.streamable_http_app()
+
+    async def garmin_auto_sync():
+        # Keep yesterday (finished sleep/HRV) and today fresh without anyone pressing Sync.
+        await asyncio.sleep(30)
+        while True:
+            try:
+                if await asyncio.to_thread(link.connected):
+                    day = today()
+                    await asyncio.to_thread(link.sync, day - timedelta(days=1), day)
+            except Exception as error:  # never let a Garmin hiccup stop the loop
+                log.warning("Automatic Garmin sync failed: %s", error)
+            await asyncio.sleep(settings.garmin_sync_hours * 3600)
 
     @asynccontextmanager
     async def lifespan(app):
+        task = asyncio.create_task(garmin_auto_sync()) if settings.garmin_sync_hours > 0 else None
         async with mcp.session_manager.run():
             yield
+        if task:
+            task.cancel()
         engine.dispose()
 
     app = FastAPI(title="Food diary", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
-    app.state.sessions, app.state.engine, app.state.oauth = sessions, engine, oauth
+    app.state.sessions, app.state.engine, app.state.oauth, app.state.garmin = sessions, engine, oauth, link
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="food_diary",
         max_age=30 * 86400, same_site="lax", https_only=settings.production)
 
@@ -73,6 +96,10 @@ def create_app(settings=None):
         if settings.production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
+
+    @app.exception_handler(GarminError)
+    async def garmin_handler(request, error):
+        return JSONResponse({"detail": str(error)}, status_code=400)
 
     @app.exception_handler(diary.ConflictError)
     async def conflict_handler(request, error):
@@ -129,15 +156,17 @@ def create_app(settings=None):
         day = date or today()
         with sessions() as db:
             data = diary.get_day(db, day)
-        return templates.TemplateResponse(request, "diary.html", context(request, data=data, day=day,
-            previous=day - timedelta(days=1), following=day + timedelta(days=1), categories=CATEGORIES))
+            health = garmin.health_day(db, day)
+        return templates.TemplateResponse(request, "diary.html", context(request, data=data, day=day, health=health,
+            garmin_connected=link.connected(), previous=day - timedelta(days=1), following=day + timedelta(days=1),
+            categories=CATEGORIES))
 
     @app.get("/settings")
     def settings_page(request: Request):
         if redirect := require_page(request):
             return redirect
         return templates.TemplateResponse(request, "settings.html", context(request, mcp_url=oauth.resource,
-            export_start=today() - timedelta(days=30)))
+            export_start=today() - timedelta(days=30), garmin=link.status()))
 
     @app.get("/api/days/{day}", dependencies=[Depends(security.require_user)])
     def read_day(day: date):
@@ -159,6 +188,31 @@ def create_app(settings=None):
     def put_note(day: date, note: NoteInput):
         with sessions() as db:
             return diary.save_note(db, day, note)
+
+    @app.get("/api/health/{day}", dependencies=[Depends(security.require_user)])
+    def read_health(day: date):
+        with sessions() as db:
+            return garmin.health_day(db, day)
+
+    @app.get("/api/garmin", dependencies=[Depends(security.require_user)])
+    def garmin_status():
+        return link.status()
+
+    # Plain `def` routes run in FastAPI's thread pool, so slow Garmin calls never block the event loop.
+    @app.post("/api/garmin/key", dependencies=[Depends(security.check_write)])
+    def garmin_key(request: Request, body: GarminKey):
+        security.rate_limit(request, "garmin", limit=6)
+        return link.save_key(body.api_key)
+
+    @app.post("/api/garmin/sync", dependencies=[Depends(security.check_write)])
+    def garmin_sync(body: GarminSync):
+        end = body.end or today()
+        start = body.start or end - timedelta(days=body.days - 1)
+        return link.sync(start, end, max_days=92)
+
+    @app.post("/api/garmin/disconnect", dependencies=[Depends(security.check_write)])
+    def garmin_disconnect():
+        return link.disconnect()
 
     @app.get("/export", dependencies=[Depends(security.require_user)])
     def export(start: date, end: date):

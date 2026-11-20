@@ -1,3 +1,4 @@
+from datetime import date
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -47,3 +48,15 @@ class NoteInput(BaseModel):
     text: str = Field(max_length=10000)
     expected_version: int = Field(ge=0)
 
+
+
+class GarminKey(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_key: str = Field(min_length=1, max_length=4000)
+
+
+class GarminSync(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: date | None = None
+    end: date | None = None
+    days: int = Field(default=1, ge=1, le=92)
