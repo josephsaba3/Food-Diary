@@ -17,7 +17,7 @@ from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import diary, garmin
+from . import diary, garmin, health_view
 from .config import Settings
 from .database import make_engine, session_factory
 from .importing import ImportBundle, import_bundle
@@ -25,7 +25,7 @@ from .garmin import GarminError, GarminLink
 from .mcp_server import build_mcp
 from .models import AuthRecord
 from .oauth import MCPAuthorization, OAuth
-from .schemas import CATEGORIES, Category, GarminKey, GarminSync, MealInput, NoteInput
+from .schemas import CATEGORIES, Category, GarminHistory, GarminKey, GarminSync, MealInput, NoteInput
 from .security import Security, local_next
 
 ROOT = Path(__file__).parent
@@ -158,8 +158,23 @@ def create_app(settings=None, garmin_http=None):
             data = diary.get_day(db, day)
             health = garmin.health_day(db, day)
         return templates.TemplateResponse(request, "diary.html", context(request, data=data, day=day, health=health,
+            section="diary", timedelta_30=timedelta(days=29),
             garmin_connected=link.connected(), previous=day - timedelta(days=1), following=day + timedelta(days=1),
             categories=CATEGORIES))
+
+    @app.get("/health")
+    def health_page(request: Request, period: int | None = None, start: date | None = None, end: date | None = None,
+                    day: date | None = None):
+        if redirect := require_page(request):
+            return redirect
+        first, last, key = health_view.resolve_period(today(), period, start, end)
+        with sessions() as db:
+            view = health_view.build(garmin.health_range(db, first, last), first, last, today())
+        if day and first <= day <= last:
+            view["selected"] = (day - first).days
+        status = link.status()
+        return templates.TemplateResponse(request, "health.html", context(request, view=view, period=key, section="health",
+            garmin=status, limited="limiting" in (status["last_error"] or "")))
 
     @app.get("/settings")
     def settings_page(request: Request):
@@ -209,6 +224,16 @@ def create_app(settings=None, garmin_http=None):
         end = body.end or today()
         start = body.start or end - timedelta(days=body.days - 1)
         return link.sync(start, end, max_days=92)
+
+    @app.post("/api/garmin/history", dependencies=[Depends(security.check_write)])
+    def garmin_history(body: GarminHistory):
+        end = body.end or today()
+        start = body.start or end - timedelta(days=body.days - 1)
+        return link.start_job(start, end)
+
+    @app.get("/api/garmin/history", dependencies=[Depends(security.require_user)])
+    def garmin_history_status():
+        return link.job_status()
 
     @app.post("/api/garmin/disconnect", dependencies=[Depends(security.check_write)])
     def garmin_disconnect():

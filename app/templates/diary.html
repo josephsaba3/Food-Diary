@@ -59,6 +59,7 @@
         {% for a in health.activities %}<li><span class="activity-name">{{ a.name or a.type|label }}</span><span class="small muted">{% if a.start %}{{ a.start[11:] }} · {% endif %}{% if a.duration_minutes %}{{ a.duration_minutes|hm }}{% endif %}{% if a.distance_km %} · {{ a.distance_km }} km{% endif %}{% if a.pace %} · {{ a.pace }}{% endif %}{% if a.avg_hr %} · {{ a.avg_hr }} bpm avg{% endif %}{% if a.calories %} · {{ a.calories }} kcal{% endif %}</span></li>{% endfor %}
       </ul>
       {% endif %}
+      {% if garmin_connected or health.synced %}<a class="compare-link" href="/health?start={{ day - timedelta_30 }}&amp;end={{ day }}&amp;day={{ day }}">See how this compares over 30 days<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></a>{% endif %}
       {% if health.synced %}<p class="small muted health-synced">Synced {{ health.synced_at|localtime }}</p>{% endif %}
     </section>
     <section class="notes-section" aria-labelledby="notes-heading">

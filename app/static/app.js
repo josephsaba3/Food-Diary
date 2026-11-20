@@ -202,12 +202,43 @@ document.querySelectorAll(".garmin-key-form").forEach(form => form.addEventListe
   event.preventDefault();
   garminPost("/api/garmin/key", formBody(form), event.submitter, () => location.reload());
 }));
-$("#garmin-sync-form")?.addEventListener("submit", event => {
+// Long Garmin downloads run on the server; poll until they finish.
+async function watchHistory(statusEl, onDone) {
+  for (;;) {
+    let job;
+    try { job = await api("/api/garmin/history"); } catch (error) { statusEl.textContent = error.message; return; }
+    if (job.state === "running") {
+      statusEl.textContent = `Downloading from Garmin… ${job.done_days} of ${job.total_days} days`;
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      continue;
+    }
+    if (job.state !== "idle") onDone(job);
+    return;
+  }
+}
+function historySummary(job) {
+  const days = `${job.days_synced} ${job.days_synced === 1 ? "day" : "days"} with data`;
+  const workouts = `${job.activities_synced} ${job.activities_synced === 1 ? "workout" : "workouts"}`;
+  return `${days}, ${workouts}.${job.error ? " " + job.error : ""}`;
+}
+async function startHistory(body, button, statusEl, onDone) {
+  if (button) button.disabled = true;
+  statusEl.textContent = "Starting…";
+  try { await api("/api/garmin/history", {method:"POST", body:JSON.stringify(body)}); }
+  catch (error) {
+    // Another download already running: follow it instead of failing.
+    if (!/already running/.test(error.message)) { statusEl.textContent = error.message; if (button) button.disabled = false; return; }
+  }
+  await watchHistory(statusEl, job => { if (button) button.disabled = false; onDone(job); });
+  if (button) button.disabled = false;
+}
+$("#garmin-history-form")?.addEventListener("submit", event => {
   event.preventDefault();
-  garminPost("/api/garmin/sync", {days:Number($("#garmin-days").value)}, event.submitter, result => {
-    $("#garmin-status").textContent = `${result.days_synced} ${result.days_synced === 1 ? "day" : "days"} synced${result.activities_synced != null ? `, ${result.activities_synced} ${result.activities_synced === 1 ? "workout" : "workouts"}` : ""}.${result.stopped_early ? " " + result.stopped_early : ""}`;
-  });
+  startHistory({days:Number($("#garmin-days").value)}, event.submitter, $("#garmin-status"), job => { $("#garmin-status").textContent = historySummary(job); });
 });
+if ($("#garmin-history-form") && $("#garmin-history-form").dataset.running === "true") {
+  watchHistory($("#garmin-status"), job => { $("#garmin-status").textContent = historySummary(job); });
+}
 $("#garmin-disconnect")?.addEventListener("click", event => {
   if (!confirm("Unlink Garmin? Health data already synced stays in your diary.")) return;
   garminPost("/api/garmin/disconnect", {}, event.target, () => location.reload());
@@ -223,5 +254,137 @@ $("#garmin-sync")?.addEventListener("click", async event => {
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; button.lastChild.textContent = "Sync"; }
 });
+
+// The page's CSP forbids inline style attributes, so chart geometry arrives as data-pos="prop:value;…"
+// and is applied through the CSSOM, which the policy allows.
+document.querySelectorAll("[data-pos]").forEach(node => {
+  node.dataset.pos.split(";").forEach(pair => {
+    const at = pair.indexOf(":");
+    if (at > 0) node.style.setProperty(pair.slice(0, at).trim(), pair.slice(at + 1).trim());
+  });
+});
+const health = $(".health-layout");
+if (health && $("#health-data")) {
+  const days = JSON.parse($("#health-data").textContent);
+  let selected = Number(health.dataset.selected), sheetIndex = selected;
+  const fmt = n => n == null ? "–" : Math.round(n).toLocaleString("en-AU");
+  const hm = minutes => `${Math.floor(minutes / 60)}h ${String(Math.round(minutes % 60)).padStart(2, "0")}m`;
+  const label = value => value ? String(value).replace(/_/g, " ").toLowerCase().replace(/^./, c => c.toUpperCase()) : "";
+  const shortDate = iso => { const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-AU", {day:"numeric", month:"short"}); };
+  function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; }
+  function setValue(node, value, unit) {
+    node.replaceChildren();
+    if (value == null) { node.append(el("span", "muted no-reading", "No readings")); return; }
+    node.append(String(value));
+    if (unit) node.append(el("small", null, " " + unit));
+  }
+  function show(i) {
+    const day = days[i];
+    if (!day) return;
+    document.querySelectorAll(".col.sel").forEach(col => col.classList.remove("sel"));
+    document.querySelectorAll(`.col[data-i="${i}"]`).forEach(col => col.classList.add("sel"));
+    $("#sel-title").textContent = day.long;
+    $("#sel-status").textContent = day.worn ? "Watch worn" + (day.workout ? " · " + day.workout : "") : "No watch readings this day";
+    $("#sel-view").href = `/?date=${day.iso}`;
+    const worn = day.worn;
+    setValue($('[data-value="steps"]'), worn ? fmt(day.steps) : null, "steps");
+    setValue($('[data-value="rhr"]'), worn ? day.rhr : null, "bpm");
+    setValue($('[data-value="stress"]'), worn ? (day.stress ?? "–") : null, "avg");
+    setValue($('[data-value="bb"]'), worn ? (day.bb_high != null ? `${day.bb_low}–${day.bb_high}` : "–") : null, "low–high");
+  }
+  function select(i) { selected = i; show(i); }
+  document.querySelectorAll(".col").forEach(col => {
+    col.addEventListener("click", () => select(Number(col.dataset.i)));
+    col.addEventListener("mouseenter", () => show(Number(col.dataset.i)));
+  });
+  document.querySelectorAll(".plot").forEach(plot => plot.addEventListener("mouseleave", () => show(selected)));
+
+  // Day sheet ------------------------------------------------------------------
+  const sheet = $("#day-sheet");
+  function tile(title, value, unit, sub, muted = false) {
+    const box = el("div", "health-tile"), dd = el("dd", muted ? "muted-value" : null, String(value));
+    if (unit) dd.append(el("small", null, " " + unit));
+    box.append(el("dt", null, title), dd);
+    if (sub) box.append(el("span", null, sub));
+    return box;
+  }
+  const join = parts => parts.filter(Boolean).join(" · ");
+  function tilesFor(day) {
+    const s = day.summary || {}, out = [];
+    const st = s.steps, hr = s.heart_rate, stress = s.stress, bb = s.body_battery, cal = s.calories, im = s.intensity_minutes;
+    if (st?.total != null) out.push(tile("Steps", fmt(st.total), null, join([st.goal ? `Goal ${fmt(st.goal)}` : "", st.distance_km ? `${st.distance_km} km` : ""])));
+    if (hr?.resting != null) out.push(tile("Resting heart rate", hr.resting, "bpm", join([hr.min != null ? `Range ${hr.min}–${hr.max}` : "", hr.resting_7_day_avg ? `7-day ${hr.resting_7_day_avg}` : ""])));
+    if (stress?.average != null) out.push(tile("Stress", stress.average, "avg", join([stress.max != null ? `Peak ${stress.max}` : "", stress.high_minutes ? `${hm(stress.high_minutes)} high` : ""])));
+    if (bb?.highest != null) out.push(tile("Body Battery", bb.highest, "high", join([bb.lowest != null ? `Low ${bb.lowest}` : "", bb.charged != null ? `+${bb.charged} / −${bb.drained ?? 0}` : ""])));
+    if (s.sleep?.total_minutes != null) out.push(tile("Sleep", hm(s.sleep.total_minutes), null, join([s.sleep.score != null ? `Score ${s.sleep.score}` : "", label(s.sleep.quality)])));
+    if (s.hrv?.last_night_avg != null) out.push(tile("Overnight HRV", s.hrv.last_night_avg, "ms", label(s.hrv.status)));
+    if (cal?.active != null) out.push(tile("Active calories", fmt(cal.active), null, cal.total != null ? `${fmt(cal.total)} total` : ""));
+    if (im && (im.moderate != null || im.vigorous != null)) out.push(tile("Intensity minutes", (im.moderate || 0) + 2 * (im.vigorous || 0), null, `${im.moderate || 0} moderate · ${im.vigorous || 0} vigorous`));
+    if (s.respiration?.waking_avg != null) out.push(tile("Breathing", Math.round(s.respiration.waking_avg), "/min", "Awake average"));
+    const acts = day.activities || [];
+    if (!acts.length) out.push(tile("Workouts", "None", null, "No activity recorded", true));
+    else if (acts.length === 1) {
+      const a = acts[0];
+      out.push(tile("Workout", a.name || label(a.type), null, join([a.duration_minutes ? `${Math.round(a.duration_minutes)} min` : "", a.distance_km ? `${a.distance_km} km` : "", a.avg_hr ? `${a.avg_hr} bpm avg` : ""])));
+    } else out.push(tile("Workouts", acts.length, null, acts.map(a => a.name || label(a.type)).join(", ")));
+    return out;
+  }
+  function fillSheet(i) {
+    const day = days[i];
+    sheetIndex = i;
+    $("#sheet-title").textContent = day.long;
+    const synced = day.synced_at ? `synced ${shortDate(day.synced_at.slice(0, 10))}` : "not synced yet";
+    $("#sheet-status").textContent = `${day.worn ? "Watch worn" : "No watch readings"} · ${synced}`;
+    $("#sheet-empty").hidden = day.worn;
+    $("#sheet-tiles").replaceChildren(...(day.worn ? tilesFor(day) : []));
+    $("#sheet-meals").href = $("#sheet-open").href = `/?date=${day.iso}`;
+    $("#sheet-meals-sub").textContent = `What you logged in the diary on ${shortDate(day.iso)}`;
+    const prev = days[i - 1], next = days[i + 1];
+    $("#sheet-prev").disabled = !prev; $("#sheet-next").disabled = !next;
+    $("#sheet-prev").setAttribute("aria-label", prev ? `Previous day: ${prev.long}` : "Previous day");
+    $("#sheet-next").setAttribute("aria-label", next ? `Next day: ${next.long}` : "Next day");
+  }
+  function openSheet(i) { fillSheet(i); select(i); if (!sheet.open) { sheet.showModal(); document.body.classList.add("editor-open"); } }
+  sheet.addEventListener("close", () => document.body.classList.remove("editor-open"));
+  sheet.addEventListener("click", event => { if (event.target === sheet) sheet.close(); });
+  $("[data-close-sheet]").addEventListener("click", () => sheet.close());
+  $("#sheet-prev").addEventListener("click", () => openSheet(sheetIndex - 1));
+  $("#sheet-next").addEventListener("click", () => openSheet(sheetIndex + 1));
+  $("#sel-view").addEventListener("click", event => { event.preventDefault(); openSheet(selected); });
+  document.querySelectorAll("[data-open-day]").forEach(link => link.addEventListener("click", event => { event.preventDefault(); openSheet(Number(link.dataset.openDay)); }));
+  $("#show-all-days")?.addEventListener("click", event => { $(".log-section").classList.add("show-more"); event.target.hidden = true; });
+}
+const periodForm = $("#period-form");
+if (periodForm) {
+  const go = params => { location.href = "/health?" + new URLSearchParams(params); };
+  periodForm.querySelectorAll('[name="period"]').forEach(radio => radio.addEventListener("change", () => {
+    if (radio.value === "custom") { periodForm.classList.add("custom"); periodForm.elements.start.focus(); }
+    else go({period: radio.value});
+  }));
+  if (periodForm.elements.period.value === "custom") periodForm.classList.add("custom");
+  ["start", "end"].forEach(name => periodForm.elements[name].addEventListener("change", () => {
+    const start = periodForm.elements.start.value, end = periodForm.elements.end.value;
+    if (start && end) go({start, end});
+  }));
+}
+document.querySelectorAll("[data-health-sync]").forEach(button => button.addEventListener("click", () => {
+  const layout = $(".health-layout"), status = $("#health-sync-status"), alert = $("#health-alert");
+  const buttons = document.querySelectorAll("[data-health-sync]");
+  buttons.forEach(b => b.disabled = true); alert.hidden = true;
+  startHistory({start: layout.dataset.start, end: layout.dataset.end}, null, status, job => {
+    if (job.error) {
+      alert.textContent = /limiting/.test(job.error) ? "Garmin is limiting requests right now. Your saved days still show below. Try syncing again in a few minutes." : job.error;
+      alert.hidden = false; status.textContent = job.days_synced ? historySummary({...job, error: null}) : "";
+      if (!/limiting/.test(job.error)) buttons.forEach(b => b.disabled = false);
+      return;
+    }
+    status.textContent = "Synced. Updating…";
+    location.reload();
+  }).finally(() => { if (alert.hidden) buttons.forEach(b => b.disabled = false); });
+}));
+if ($(".health-layout") && $("[data-health-sync]")) {
+  // Pick up a download started elsewhere (Settings, or another tab).
+  api("/api/garmin/history").then(job => { if (job.state === "running") watchHistory($("#health-sync-status"), () => location.reload()); }).catch(() => {});
+}
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

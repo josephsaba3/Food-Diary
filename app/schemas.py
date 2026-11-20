@@ -55,6 +55,13 @@ class GarminKey(BaseModel):
     api_key: str = Field(min_length=1, max_length=4000)
 
 
+class GarminHistory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: date | None = None
+    end: date | None = None
+    days: int = Field(default=180, ge=1, le=731)
+
+
 class GarminSync(BaseModel):
     model_config = ConfigDict(extra="forbid")
     start: date | None = None

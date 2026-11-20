@@ -43,7 +43,7 @@ class FakeGarmin:
     """Stands in for personal.connectapi.garmin.com: key exchange, bearer-token GETs, failures on demand."""
     def __init__(self):
         self.valid_key, self.issued, self.revoked, self.fail = KEY, [], set(), None
-        self.activities, self.calls, self.wrapped_sleep = None, [], True
+        self.activities, self.calls, self.wrapped_sleep, self.empty_days = None, [], True, set()
 
     def exchange(self, api_key):
         if api_key != self.valid_key:
@@ -60,8 +60,10 @@ class FakeGarmin:
             raise self.fail
         if path == "/usersummary-service/usersummary/daily":
             assert set(params) == {"calendarDate"}
-            return STATS
+            return None if params["calendarDate"] in self.empty_days else STATS
         if path == "/sleep-service/sleep/dailySleep":
+            if params["date"] in self.empty_days:
+                return None
             return SLEEP if self.wrapped_sleep else {**SLEEP["dailySleepDTO"], "avgOvernightHrv": 54.0}
         if path.startswith("/hrv-service/hrv/"):
             return HRV
@@ -203,3 +205,88 @@ def test_mcp_health_tools(client, account):
     assert data(call("get_activities", start=day, end=day))[0]["type"] == "running"
     assert call("get_health_range", start="2026-01-01", end="2026-03-01")["isError"]
     assert data(call("get_garmin_status"))[0]["connected"]
+
+
+def wait_for_job(app):
+    app.state.garmin.job_thread.join(timeout=10)
+    return app.state.garmin.job_status()
+
+
+def test_history_download_runs_in_background_chunks(client, app, account):
+    assert client.post("/api/garmin/history", json={"days": 182}).json()["detail"].startswith("Garmin isn’t connected")
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    started = client.post("/api/garmin/history", json={"days": 182})
+    assert started.status_code == 200 and started.json()["total_days"] == 182
+    job = wait_for_job(app)
+    assert job["state"] == "done" and job["done_days"] == 182 and job["days_synced"] == 182 and job["error"] is None
+    # 182 days = six 31-day chunks (the last one shorter), one activity search per chunk.
+    searches = [c for c in account.calls if c[0] == "/activitylist-service/activities/search/activities"]
+    assert len(searches) == 6
+    assert client.get("/api/garmin").json()["synced_days"]["count"] == 182
+    assert client.post("/api/garmin/history", json={"days": 800}).status_code == 422
+
+
+def test_history_download_stops_on_rate_limit_and_blocks_parallel_syncs(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    calls = {"n": 0}
+    original = account.get
+    def slow_then_limited(token, path, params=None):
+        calls["n"] += 1
+        if calls["n"] > 40:
+            raise ApiError(429)
+        return original(token, path, params)
+    account.get = slow_then_limited
+    client.post("/api/garmin/history", json={"days": 90})
+    job = wait_for_job(app)
+    assert job["state"] == "failed" and "limiting" in job["error"] and 0 < job["days_synced"] < 90
+    page = client.get("/health").text
+    assert "Garmin is limiting requests right now" in page
+    app.state.garmin.lock.acquire()
+    try:
+        assert "already running" in client.post("/api/garmin/history", json={"days": 7}).json()["detail"]
+    finally:
+        app.state.garmin.lock.release()
+
+
+def test_health_page_states(client, app, account):
+    page = client.get("/health").text
+    assert "Link your Garmin to see trends" in page and 'href="/settings#garmin"' in page
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    empty = client.get("/health?period=7").text
+    assert "0 of 7 days" in empty and "No watch readings for these days" in empty
+    day = today()
+    account.empty_days = {(day - timedelta(days=n)).isoformat() for n in (0, 1, 2, 5)}
+    client.post("/api/garmin/history", json={"days": 30})
+    wait_for_job(app)
+    page = client.get("/health").text
+    assert "26 of 30 days" in page and "Steps per day" in page and "11,234" in page and "49.0" in page
+    assert "No watch readings · 3 days" in page  # today and the two days before collapse into one row
+    assert page.count("class=\"col sel\"") == 4  # the latest worn day is selected in all four charts
+    assert "Show all 30 days" in page and 'aria-current="page">Health' in page
+    assert client.get("/health?start=2026-01-01&end=2026-12-31").status_code == 200
+    custom = client.get(f"/health?start={day - timedelta(days=200)}&end={day}").text
+    assert "of 93 days" in custom
+    chosen = day - timedelta(days=10)
+    assert f'id="sel-view" href="/?date={chosen}"' in client.get(f"/health?day={chosen}").text
+    diary = client.get(f"/?date={day - timedelta(days=3)}").text
+    assert "See how this compares over 30 days" in diary
+
+
+def test_health_view_model():
+    from app import health_view
+    start = date(2026, 11, 1)
+    days = []
+    for n in range(10):
+        d = start + timedelta(days=n)
+        worn = n not in (3, 4, 5, 9)
+        summary = {"steps": {"total": 1000 * (n + 1)}, "heart_rate": {"resting": 60 + n},
+                   "stress": {"average": 20 + n}, "body_battery": {"highest": 80, "lowest": 10 + n}} if worn else {}
+        days.append({"date": d.isoformat(), "summary": summary, "activities": [], "synced_at": None})
+    v = health_view.build(days, start, start + timedelta(days=9), start + timedelta(days=9))
+    assert v["worn_count"] == 6 and v["selected"] == 8
+    assert v["averages"]["steps"] == "5,000" and v["averages"]["rhr_range"] == "60–68 bpm"
+    assert v["averages"]["bb_low"] == "10 at its low" and v["averages"]["stress_peak"] == "28 · 9 Nov"
+    titles = [r["title"] for r in v["rows"]]
+    assert titles[0] == "Tue 10 Nov" and "4–6 Nov" in titles and len(v["rows"]) == 8
+    assert v["charts"]["rhr_path"].count("M") == 2  # the line breaks across the unworn days
+    assert health_view.resolve_period(date(2026, 11, 20), start=date(2026, 1, 1), end=date(2026, 12, 1))[0] == date(2026, 11, 20) - timedelta(days=92)
