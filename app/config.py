@@ -22,6 +22,17 @@ def database_url_from_env():
     return url or "sqlite:///./food-diary.db"
 
 
+def garmin_sync_hours_from_env():
+    raw = os.getenv("GARMIN_SYNC_HOURS", "4").strip() or "0"
+    try:
+        hours = float(raw)
+    except ValueError:
+        raise RuntimeError("GARMIN_SYNC_HOURS must be a number of hours, or 0 to turn automatic Garmin syncing off.")
+    if hours and hours < 1:
+        raise RuntimeError("GARMIN_SYNC_HOURS must be at least 1 (or 0 to turn it off) so Garmin isn't polled too often.")
+    return hours
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -31,6 +42,8 @@ class Settings:
     timezone: str = "Australia/Sydney"
     production: bool = False
     extra_redirect_uris: tuple[str, ...] = ()
+    # Hours between automatic Garmin syncs of yesterday and today; 0 turns it off.
+    garmin_sync_hours: float = 0
 
     @classmethod
     def from_env(cls):
@@ -43,6 +56,7 @@ class Settings:
             timezone=os.getenv("TIMEZONE", "Australia/Sydney"),
             production=production,
             extra_redirect_uris=tuple(x.strip() for x in os.getenv("OAUTH_REDIRECT_URIS", "").split(",") if x.strip()),
+            garmin_sync_hours=garmin_sync_hours_from_env(),
         )
         if len(settings.password) < 12 or len(settings.session_secret) < 32:
             raise RuntimeError("Set APP_PASSWORD (12+ characters) and SESSION_SECRET (32+ characters) in .env or Railway Variables.")

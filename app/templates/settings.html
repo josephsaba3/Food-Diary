@@ -4,8 +4,34 @@
 {% block content %}
 <main id="main" class="settings-page">
   <h1>Your diary, connected.</h1>
-  <p class="lede">Keep a copy, bring your entries over, or log a meal with Claude.</p>
+  <p class="lede">Keep a copy, bring your entries over, link your Garmin, or log a meal with Claude.</p>
   <section class="settings-section"><h2>Connect Claude</h2><p>In Claude, open Settings → Connectors → Add custom connector and paste this server URL. Sign in with your diary password and approve the connection.</p><label for="mcp-url">Server URL</label><div class="copy-field"><input id="mcp-url" readonly value="{{ mcp_url }}"><button class="button secondary" id="copy-url" type="button">Copy</button></div><p class="small muted">The connection can read and update meals and daily notes. You can disconnect it here at any time.</p><button class="button secondary" id="disconnect" type="button">Disconnect all connections</button><p id="connection-status" role="status" class="small"></p></section>
+  <section class="settings-section" id="garmin"><h2>Garmin</h2>
+    {% if garmin.connected %}
+    <p>Linked{% if garmin.name %} to <strong>{{ garmin.name }}</strong>{% endif %}. Steps, sleep, heart rate, Body Battery, stress, HRV and workouts sync into the diary{% if garmin.synced_days.count %} — {{ garmin.synced_days.count }} {{ 'day' if garmin.synced_days.count == 1 else 'days' }} so far{% endif %}.</p>
+    <p class="small muted">{% if garmin.last_sync_at %}Last synced {{ garmin.last_sync_at|localtime }}.{% else %}Not synced yet.{% endif %}</p>
+    {% if garmin.last_error %}<p class="error">{{ garmin.last_error }}</p>{% endif %}
+    <form id="garmin-sync-form" class="inline-form"><label for="garmin-days">Download the last</label><select id="garmin-days" name="days"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option><option value="90">90 days</option></select><button class="button primary" type="submit">Sync now</button></form>
+    <button class="button secondary" id="garmin-disconnect" type="button">Unlink Garmin</button>
+    <p class="small muted">Unlinking forgets the Garmin sign-in. Health data already synced stays in your diary.</p>
+    {% else %}
+    <p>Sign in with your Garmin Connect account to bring in data from your watch. Your Garmin password is used once to sign in and isn’t stored; the diary keeps an encrypted sign-in token instead.</p>
+    <form id="garmin-login-form" class="stack-form" {% if garmin.awaiting_mfa_code %}hidden{% endif %}>
+      <label for="garmin-email">Garmin email</label><input id="garmin-email" name="email" type="email" autocomplete="off" required>
+      <label for="garmin-password">Garmin password</label><input id="garmin-password" name="password" type="password" autocomplete="off" required>
+      <button class="button primary" type="submit">Link Garmin</button>
+    </form>
+    <form id="garmin-mfa-form" class="stack-form" {% if not garmin.awaiting_mfa_code %}hidden{% endif %}>
+      <label for="garmin-code">Verification code</label><p class="small muted">Garmin sent a code to your email or phone.</p><input id="garmin-code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+      <button class="button primary" type="submit">Verify</button>
+    </form>
+    <details class="token-details"><summary>Sign-in blocked? Paste a token instead</summary>
+      <p class="small muted">Garmin sometimes blocks sign-ins from cloud servers. On your own computer run <code>python scripts/garmin_tokens.py</code>, then paste what it prints.</p>
+      <form id="garmin-token-form" class="stack-form"><label for="garmin-token">garmin_tokens.json</label><textarea id="garmin-token" name="tokens" rows="3" required spellcheck="false"></textarea><button class="button secondary" type="submit">Link with token</button></form>
+    </details>
+    {% endif %}
+    <p id="garmin-status" role="status" class="small"></p>
+  </section>
   <section class="settings-section"><h2>Export your diary</h2><p>Download meals, symptoms and notes as a JSON file you can import again.</p><form action="/export" method="get" class="export-form"><div><label for="export-start">From</label><input type="date" id="export-start" name="start" value="{{ export_start }}" required></div><div><label for="export-end">To</label><input type="date" id="export-end" name="end" value="{{ today }}" required></div><button class="button primary" type="submit">Download diary</button></form></section>
   <section class="settings-section"><h2>Import entries</h2><p>Choose a Food diary JSON file. Existing meals and notes stay as they are.</p><form id="import-form"><label for="import-file">Diary file</label><input type="file" id="import-file" accept="application/json,.json" required><button class="button secondary" type="submit">Import diary</button><p id="import-status" role="status" class="small"></p></form></section>
   <section class="settings-section"><h2>Session</h2><p class="muted">Dates and times use {{ timezone.replace('_', ' ') }}.</p><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button secondary" type="submit">Sign out</button></form></section>

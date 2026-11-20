@@ -189,4 +189,51 @@ $("#import-form")?.addEventListener("submit", async event => {
   finally { button.disabled = false; }
 });
 
+async function garminPost(url, body, button, done) {
+  const status = $("#garmin-status");
+  if (button) button.disabled = true;
+  status.textContent = "Talking to Garmin…";
+  try { const result = await api(url, {method:"POST", body:JSON.stringify(body)}); done(result); }
+  catch (error) { status.textContent = error.message; }
+  finally { if (button) button.disabled = false; }
+}
+const formBody = form => Object.fromEntries(new FormData(form));
+$("#garmin-login-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  garminPost("/api/garmin/login", formBody(event.target), event.submitter, result => {
+    $("#garmin-password").value = "";
+    if (result.status === "needs_mfa") { event.target.hidden = true; $("#garmin-mfa-form").hidden = false; $("#garmin-code").focus(); $("#garmin-status").textContent = ""; }
+    else location.reload();
+  });
+});
+$("#garmin-mfa-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  garminPost("/api/garmin/mfa", formBody(event.target), event.submitter, () => location.reload());
+});
+$("#garmin-token-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  garminPost("/api/garmin/tokens", formBody(event.target), event.submitter, () => location.reload());
+});
+$("#garmin-sync-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  garminPost("/api/garmin/sync", {days:Number($("#garmin-days").value)}, event.submitter, result => {
+    $("#garmin-status").textContent = `${result.days_synced} ${result.days_synced === 1 ? "day" : "days"} synced${result.activities_synced != null ? `, ${result.activities_synced} ${result.activities_synced === 1 ? "workout" : "workouts"}` : ""}.${result.stopped_early ? " " + result.stopped_early : ""}`;
+  });
+});
+$("#garmin-disconnect")?.addEventListener("click", event => {
+  if (!confirm("Unlink Garmin? Health data already synced stays in your diary.")) return;
+  garminPost("/api/garmin/disconnect", {}, event.target, () => location.reload());
+});
+$("#garmin-sync")?.addEventListener("click", async event => {
+  const button = event.currentTarget, day = button.dataset.day;
+  button.disabled = true; button.lastChild.textContent = "Syncing…";
+  try {
+    await api("/api/garmin/sync", {method:"POST", body:JSON.stringify({start:day, end:day})});
+    const unsaved = $("#meal-dialog")?.open || ($("#notes-status")?.textContent === "Unsaved changes");
+    if (unsaved) toast("Garmin synced. Save your changes, then reload to see it.");
+    else location.reload();
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; button.lastChild.textContent = "Sync"; }
+});
+
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

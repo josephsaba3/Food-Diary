@@ -54,10 +54,11 @@ def run():
         artifacts = ROOT / "artifacts"
         artifacts.mkdir(exist_ok=True)
         with sync_playwright() as p:
-            chrome = Path(os.environ["PROGRAMFILES"]) / "Google/Chrome/Application/chrome.exe"
-            edge = Path(os.environ["PROGRAMFILES(X86)"]) / "Microsoft/Edge/Application/msedge.exe"
-            executable = chrome if chrome.exists() else edge
-            browser = p.chromium.launch(executable_path=str(executable), headless=True)
+            chrome = Path(os.environ.get("PROGRAMFILES", "/nonexistent")) / "Google/Chrome/Application/chrome.exe"
+            edge = Path(os.environ.get("PROGRAMFILES(X86)", "/nonexistent")) / "Microsoft/Edge/Application/msedge.exe"
+            executable = next((str(path) for path in (chrome, edge) if path.exists()), os.environ.get("CHROME_PATH"))
+            # Outside Windows, set CHROME_PATH or let Playwright use its own Chromium.
+            browser = p.chromium.launch(executable_path=executable, headless=True)
             context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True, device_scale_factor=1)
             page = context.new_page()
             errors = []
