@@ -37,7 +37,7 @@ SQLite is for local use only. Railway production deliberately refuses to start w
 | `SESSION_SECRET` | A random secret of at least 32 characters |
 | `TIMEZONE` | `Australia/Sydney` |
 | `FORWARDED_ALLOW_IPS` | `*` when running exclusively behind Railway's trusted proxy |
-| `GARMIN_SYNC_HOURS` | Optional. Hours between automatic Garmin syncs; default `4`, `0` turns it off |
+| `GARMIN_SYNC_HOURS` | Optional. Hours between automatic Garmin syncs; default `3`, `0` turns it off |
 
 Generate a session secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Railway supplies `PORT`; the server binds to `0.0.0.0`. Keep one app worker/replica: the login abuse limiter is per process. Postgres stores the diary, OAuth registrations and hashed connection tokens. Enable Railway database backups; the authenticated JSON export is also available in Settings.
 
@@ -65,6 +65,7 @@ Available tools:
 - `sync_garmin`: download Garmin health data (via your Personal API key) for up to 31 days into the diary.
 - `get_health_day` / `get_health_range`: cached daily health summaries and workouts (range up to 31 days); `include_raw` adds Garmin's own fields for a day.
 - `get_activities`: cached workouts between two dates (up to a year).
+- `download_garmin_history`: start a background download of up to two years (for example the last 6 months); progress appears in `get_garmin_status`.
 
 The write tools explicitly require reading existing data first and retaining the user's details. They do not infer symptoms, severity or causal relationships. Deleting meals is available in the diary UI; no deletion tool is exposed to Claude. Use Settings → Disconnect all connections to revoke all MCP access. Changing the app password also invalidates existing login sessions and access/refresh tokens.
 
@@ -76,7 +77,9 @@ It uses Garmin's official [Connect Personal API](https://developer.garmin.com/gc
 
 1. In Garmin Connect on the web, open the [Personal API Key page](https://connect.garmin.com/app/settings/personalApiToken), select **Create Key**, accept the terms and choose an expiry (30 days to one year). Copy the key; Garmin shows it only once.
 2. In the diary, open Settings → Garmin, paste the key and choose **Link Garmin**. The diary exchanges the key for an access token, which lasts up to 24 hours and is renewed automatically, the same way as [Garmin's Python client](https://github.com/garmin/connect-personal-api-python). The key and token are stored encrypted with a key derived from `SESSION_SECRET`. If you rotate that secret, paste the key again.
-3. Choose **Sync now** to backfill up to 90 days, or use the **Sync** button on any day. While Garmin is linked, the server also re-syncs yesterday and today every `GARMIN_SYNC_HOURS` hours (default 4; `0` turns it off).
+3. To bring in history, choose a period under **Download the last** (up to 2 years) and select **Download**. It runs in the background in 31-day chunks, newest days first, and Settings and the Health page show its progress. While Garmin is linked, the server also re-syncs yesterday and today every `GARMIN_SYNC_HOURS` hours (default 3; `0` turns it off).
+
+The **Health** page (the Diary | Health switch in the header, or **See how this compares over 30 days** under a day's Garmin section) shows 7, 30 or 90 days, or any custom range up to 93 days. It includes watch coverage, averages over the days the watch was worn (a day counts as worn when it has a resting heart rate), day-by-day charts for steps, resting heart rate, stress and Body Battery, and a daily log. Selecting a day opens a sheet with that day's details and a link to its meals. The page's **Sync** downloads the period shown.
 
 Garmin emails you about a week before the key expires. Create a new key and paste it under **Replace API key**. Unlinking removes the key from the diary but keeps the health data already synced. To revoke the key itself, delete it in Garmin Connect. Re-syncing a day replaces its cached copy, and workouts deleted in Garmin Connect disappear at the next sync of their dates. Each day also keeps the trimmed Garmin responses, so `get_health_day` with `include_raw` can answer questions about fields the summary doesn't show. Training readiness isn't offered by the Personal API.
 

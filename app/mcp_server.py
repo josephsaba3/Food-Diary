@@ -67,7 +67,7 @@ def build_mcp(settings, sessions, link):
 
     @server.tool(annotations=read)
     def get_garmin_status() -> dict:
-        """Whether a Garmin watch is linked, when it last synced, and which days are cached."""
+        """Whether a Garmin watch is linked, when it last synced, which days are cached, and any history download's progress."""
         return link.status()
 
     @server.tool(annotations=fetch)
@@ -81,6 +81,18 @@ def build_mcp(settings, sessions, link):
         """
         try:
             return await anyio.to_thread.run_sync(link.sync, start, end or start)
+        except garmin.GarminError as error:
+            raise ValueError(str(error)) from error
+
+    @server.tool(annotations=fetch)
+    def download_garmin_history(start: date, end: date | None = None) -> dict:
+        """Start a background download of up to two years of Garmin data (e.g. the last 6 months), newest days first.
+
+        Returns immediately; call get_garmin_status to follow history_download progress. Use sync_garmin instead for
+        a few recent days. Only one download or sync runs at a time.
+        """
+        try:
+            return link.start_job(start, end or link.today())
         except garmin.GarminError as error:
             raise ValueError(str(error)) from error
 

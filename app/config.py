@@ -23,7 +23,7 @@ def database_url_from_env():
 
 
 def garmin_sync_hours_from_env():
-    raw = os.getenv("GARMIN_SYNC_HOURS", "4").strip() or "0"
+    raw = os.getenv("GARMIN_SYNC_HOURS", "3").strip() or "0"
     try:
         hours = float(raw)
     except ValueError:

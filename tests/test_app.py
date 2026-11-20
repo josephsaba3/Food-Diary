@@ -212,7 +212,7 @@ def test_mcp_protocol_and_real_tools_share_ui_database(client):
     assert initialized["result"]["serverInfo"]["name"] == "Food diary"
     listed = rpc("tools/list", {})["result"]["tools"]
     assert {t["name"] for t in listed} == {"get_diary_today", "get_diary_day", "get_diary_range", "save_diary_meal", "save_diary_notes",
-        "get_garmin_status", "sync_garmin", "get_health_day", "get_health_range", "get_activities"}
+        "get_garmin_status", "sync_garmin", "download_garmin_history", "get_health_day", "get_health_range", "get_activities"}
     saved = rpc("tools/call", {"name": "save_diary_meal", "arguments": {"day": "2026-09-24", "category": "breakfast", "entry": meal("MCP oats")}})
     assert not saved["result"].get("isError"), saved
     assert client.get("/api/days/2026-09-24").json()["meals"]["breakfast"]["food"] == "MCP oats"

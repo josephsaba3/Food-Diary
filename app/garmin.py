@@ -27,6 +27,8 @@ TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
 KEY_PAGE = "https://connect.garmin.com/app/settings/personalApiToken"
 TOKEN_REFRESH_WINDOW = 3600  # Get a fresh token when less than an hour remains, as Garmin's client does.
 ACTIVITY_PAGE_SIZE = 100
+CHUNK_DAYS = 31        # Longer downloads run as a background job in chunks of this size.
+MAX_HISTORY_DAYS = 731 # Two years.
 
 
 class GarminError(RuntimeError):
@@ -254,6 +256,7 @@ def health_range(session, start, end):
         day = start + timedelta(days=offset)
         row = rows.get(day)
         days.append({"date": day.isoformat(), "synced": row is not None,
+                     "synced_at": row.synced_at.isoformat() if row else None,
                      "summary": json.loads(row.summary) if row else {},
                      "activities": activities.get(day.isoformat(), [])})
     return days
@@ -297,6 +300,7 @@ class GarminLink:
                 "last_sync_at": account.last_sync_at.isoformat() if account and account.last_sync_at else None,
                 "last_error": (account.last_error or None) if account else None,
                 "synced_days": {"count": count, "first": first.isoformat() if first else None, "last": last.isoformat() if last else None},
+                "history_download": self.job_status(),
             }
 
     def save_key(self, api_key):
@@ -388,7 +392,7 @@ class GarminLink:
                 warnings.append(f"{label} unavailable (HTTP {error.status})")
             return None
 
-    def _sync(self, start, end):
+    def _sync(self, start, end, on_day=None):
         warnings, synced, activities_synced, stopped = [], 0, None, None
         try:
             vo2_by_day = {}
@@ -403,6 +407,8 @@ class GarminLink:
                 sleep = self._optional(warnings, f"{iso}: sleep", "/sleep-service/sleep/dailySleep", {"date": iso})
                 hrv = self._optional(warnings, f"{iso}: HRV", f"/hrv-service/hrv/{iso}")
                 if not stats and not sleep:
+                    if on_day:
+                        on_day()
                     continue
                 vo2 = vo2_by_day.get(iso)
                 summary = summarize_day(stats if isinstance(stats, dict) else None, sleep if isinstance(sleep, dict) else None,
@@ -412,6 +418,8 @@ class GarminLink:
                 with self.sessions.begin() as db:
                     db.merge(HealthDay(day=day, summary=json.dumps(summary), raw=json.dumps(raw), synced_at=utcnow()))
                 synced += 1
+                if on_day:
+                    on_day()
             activities = []
             for page in range(20):
                 batch = self._get("/activitylist-service/activities/search/activities",
@@ -448,3 +456,56 @@ class GarminLink:
         return {"start": start.isoformat(), "end": end.isoformat(), "days_synced": synced,
                 "activities_synced": activities_synced, "stopped_early": str(stopped) if stopped else None,
                 "warnings": warnings[:20]}
+
+    # Background history download -------------------------------------------
+
+    def job_status(self):
+        return dict(self.job) if getattr(self, "job", None) else {"state": "idle"}
+
+    def start_job(self, start, end):
+        """Download a long range (up to two years) in 31-day chunks, newest first, on a background thread."""
+        end = min(end, self.today())
+        if end < start:
+            raise GarminError("Choose dates up to today, with the end on or after the start.")
+        total = (end - start).days + 1
+        if total > MAX_HISTORY_DAYS:
+            raise GarminError("Download at most two years at a time.")
+        if not self.connected():
+            raise GarminError("Garmin isn’t connected. Add your Personal API key in the diary’s Settings first.")
+        if not self.lock.acquire(blocking=False):
+            raise GarminError("A Garmin sync is already running. Try again in a minute.")
+        self.job = {"state": "running", "start": start.isoformat(), "end": end.isoformat(), "total_days": total,
+                    "done_days": 0, "days_synced": 0, "activities_synced": 0, "error": None, "warnings": 0,
+                    "started_at": utcnow().isoformat(), "finished_at": None}
+        self.job_thread = threading.Thread(target=self._run_job, args=(start, end), daemon=True, name="garmin-history")
+        self.job_thread.start()
+        return self.job_status()
+
+    def _run_job(self, start, end):
+        job = self.job
+
+        def tick():
+            job["done_days"] += 1
+
+        try:
+            chunk_end = end
+            while chunk_end >= start:
+                chunk_start = max(start, chunk_end - timedelta(days=CHUNK_DAYS - 1))
+                done_before = job["done_days"]
+                result = self._sync(chunk_start, chunk_end, on_day=tick)
+                job["done_days"] = done_before + (chunk_end - chunk_start).days + 1
+                job["days_synced"] += result["days_synced"]
+                job["activities_synced"] += result["activities_synced"] or 0
+                job["warnings"] += len(result["warnings"])
+                if result["stopped_early"]:
+                    job["error"] = result["stopped_early"]
+                    break
+                chunk_end = chunk_start - timedelta(days=1)
+        except GarminError as error:
+            job["error"] = str(error)
+        except Exception as error:  # keep the thread's failure visible instead of silent
+            job["error"] = f"The download stopped unexpectedly ({type(error).__name__}). Try again."
+        finally:
+            job["state"] = "failed" if job["error"] else "done"
+            job["finished_at"] = utcnow().isoformat()
+            self.lock.release()
