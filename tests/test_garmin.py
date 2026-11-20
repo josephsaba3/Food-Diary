@@ -1,4 +1,6 @@
+import base64
 import json
+import time
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 from datetime import datetime
@@ -7,15 +9,13 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from garminconnect import GarminConnectAuthenticationError, GarminConnectTooManyRequestsError
 
 from app.config import Settings
-from app.garmin import summarize_activity, summarize_day
+from app.garmin import ApiError, summarize_activity, summarize_day
 from app.main import create_app
 from app.models import GarminAccount
 from tests.test_app import login, oauth_grant
 
-TOKENS = {"di_token": "access-1", "di_refresh_token": "refresh-1", "di_client_id": "client"}
 STATS = {"totalSteps": 11234, "dailyStepGoal": 10000, "totalDistanceMeters": 8650.0, "totalKilocalories": 2650.0,
          "activeKilocalories": 720.0, "restingHeartRate": 49, "minHeartRate": 45, "maxHeartRate": 171,
          "averageStressLevel": 28, "maxStressLevel": 92, "highStressDuration": 1800, "moderateIntensityMinutes": 20,
@@ -31,75 +31,54 @@ RUN = {"activityId": 21000000001, "activityName": "Morning Run", "activityType":
        "calories": 410.0, "averageHR": 152.0, "maxHR": 171.0, "aerobicTrainingEffect": 3.4, "trainingEffectLabel": "TEMPO"}
 
 
-class FakeAccount:
-    """Stands in for Garmin Connect: one account, optional MFA, token refresh on use."""
-    def __init__(self):
-        self.mfa, self.tokens, self.fail = False, dict(TOKENS), None
-        self.activities = None
-
-    def factory(self, **kwargs):
-        return FakeGarmin(self, **kwargs)
+KEY = "gcpak-0123456789abcdef0123456789abcdef"
 
 
-class FakeSession:
-    def __init__(self):
-        self.tokens = None
-
-    def dumps(self):
-        return json.dumps(self.tokens)
+def jwt(exp, n):
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+    return f"{enc({'alg': 'RS256'})}.{enc({'exp': exp, 'n': n})}.sig"
 
 
 class FakeGarmin:
-    def __init__(self, account, email=None, password=None, return_on_mfa=False, **kwargs):
-        self.account, self.email, self.password, self.return_on_mfa = account, email, password, return_on_mfa
-        self.client, self.full_name, self.display_name = FakeSession(), None, None
+    """Stands in for personal.connectapi.garmin.com: key exchange, bearer-token GETs, failures on demand."""
+    def __init__(self):
+        self.valid_key, self.issued, self.revoked, self.fail = KEY, [], set(), None
+        self.activities, self.calls, self.wrapped_sleep = None, [], True
 
-    def _signed_in(self):
-        self.client.tokens = dict(self.account.tokens)
-        self.full_name, self.display_name = "Joe Runner", "joe-runner"
+    def exchange(self, api_key):
+        if api_key != self.valid_key:
+            raise ApiError(401, "invalid key")
+        token = jwt(int(time.time()) + 86400, len(self.issued))
+        self.issued.append(token)
+        return token
 
-    def login(self, tokenstore=None):
-        if tokenstore:
-            if json.loads(tokenstore) != self.account.tokens:
-                raise GarminConnectAuthenticationError("stale")
-            self._signed_in()
-            return None, None
-        if self.password != "garmin-pass":
-            raise GarminConnectAuthenticationError("bad password")
-        if self.account.mfa and self.return_on_mfa:
-            return "needs_mfa", {"cookies": "opaque"}
-        self._signed_in()
-        return None, None
-
-    def resume_login(self, state, code):
-        if state != {"cookies": "opaque"} or code != "123456":
-            raise GarminConnectAuthenticationError("bad code")
-        self._signed_in()
-        return None, None
-
-    def _call(self, value):
-        if self.account.fail:
-            raise self.account.fail
-        # Garmin rotates tokens now and then; the diary must keep the newest pair.
-        self.account.tokens = {**self.account.tokens, "di_token": "access-2"}
-        self.client.tokens = dict(self.account.tokens)
-        return value
-
-    def get_user_summary(self, d): return self._call(STATS)
-    def get_sleep_data(self, d): return self._call(SLEEP)
-    def get_hrv_data(self, d): return self._call(HRV)
-    def get_training_readiness(self, d): return self._call([{"timestamp": "2026-11-19T06:00", "score": 71, "level": "HIGH"}])
-    def get_max_metrics(self, d): raise ValueError("no VO2 max today")
-
-    def get_activities_by_date(self, start, end):
-        if self.account.activities is not None:
-            return self._call(self.account.activities)
-        return self._call([{**RUN, "startTimeLocal": RUN["startTimeLocal"].format(day=start)}])
+    def get(self, token, path, params=None):
+        self.calls.append((path, params))
+        if token not in self.issued or token in self.revoked:
+            raise ApiError(401)
+        if self.fail:
+            raise self.fail
+        if path == "/usersummary-service/usersummary/daily":
+            assert set(params) == {"calendarDate"}
+            return STATS
+        if path == "/sleep-service/sleep/dailySleep":
+            return SLEEP if self.wrapped_sleep else {**SLEEP["dailySleepDTO"], "avgOvernightHrv": 54.0}
+        if path.startswith("/hrv-service/hrv/"):
+            return HRV
+        if path.startswith("/metrics-service/metrics/maxmet/daily/"):
+            raise ApiError(404)
+        if path == "/activitylist-service/activities/search/activities":
+            if self.activities is not None:
+                return self.activities[params["start"]:params["start"] + params["limit"]]
+            run = {**RUN, "activityId": RUN["activityId"] + date.fromisoformat(params["startDate"]).toordinal(),
+                   "startTimeLocal": RUN["startTimeLocal"].format(day=params["startDate"])}
+            return [run] if params["start"] == 0 else []
+        raise ApiError(404)
 
 
 @pytest.fixture
 def account():
-    return FakeAccount()
+    return FakeGarmin()
 
 
 @pytest.fixture
@@ -107,7 +86,7 @@ def app(tmp_path, monkeypatch, account):
     url = "sqlite:///" + (tmp_path / "diary.db").as_posix()
     monkeypatch.setenv("DATABASE_URL", url)
     command.upgrade(Config("alembic.ini"), "head")
-    return create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_client_factory=account.factory)
+    return create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_http=account)
 
 
 @pytest.fixture
@@ -133,39 +112,39 @@ def test_summaries_keep_only_recorded_values():
     assert run["pace"] == "5:00 /km" and run["distance_km"] == 6.0 and run["start"] == "2026-11-19T06:15"
 
 
-def test_link_with_password_and_mfa_never_stores_password(client, app, account):
-    account.mfa = True
-    assert client.post("/api/garmin/login", json={"email": "joe@example.com", "password": "wrong"}).status_code == 400
-    assert client.post("/api/garmin/login", json={"email": "joe@example.com", "password": "garmin-pass"}).json() == {"status": "needs_mfa"}
-    assert client.get("/api/garmin").json()["awaiting_mfa_code"] is True
-    assert client.post("/api/garmin/mfa", json={"code": "000000"}).status_code == 400
-    assert client.post("/api/garmin/mfa", json={"code": "123456"}).json() == {"status": "connected"}
-    status = client.get("/api/garmin").json()
-    assert status["connected"] and status["name"] == "Joe Runner" and not status["awaiting_mfa_code"]
+def test_link_with_personal_api_key_stores_it_encrypted(client, app, account):
+    assert client.post("/api/garmin/key", json={"api_key": "short"}).status_code == 400
+    rejected = client.post("/api/garmin/key", json={"api_key": "gcpak-wrong-key-0000000000000000"})
+    assert rejected.status_code == 400 and "rejected" in rejected.json()["detail"]
+    assert client.post("/api/garmin/key", json={"api_key": f"  ApiKey {KEY}\n"}).json() == {"connected": True}
     with app.state.sessions() as db:
-        stored = db.get(GarminAccount, 1).tokens
-    assert "garmin-pass" not in stored and "refresh-1" not in stored
-    assert json.loads(app.state.garmin.decrypt(stored)) == TOKENS
-    assert "Joe Runner" in client.get("/settings").text
+        stored = db.get(GarminAccount, 1)
+        assert KEY not in stored.api_key and app.state.garmin.decrypt(stored.api_key) == KEY
+        assert stored.token_expires_at > time.time() + 3600
+    page = client.get("/settings").text
+    assert "Linked with your Garmin Connect Personal API key" in page and KEY not in page
 
 
 def test_garmin_writes_need_csrf(client):
     client.headers.pop("X-CSRF-Token")
-    assert client.post("/api/garmin/login", json={"email": "joe@example.com", "password": "garmin-pass"}).status_code == 403
+    assert client.post("/api/garmin/key", json={"api_key": KEY}).status_code == 403
     assert client.post("/api/garmin/sync", json={}).status_code == 403
 
 
-def test_token_paste_sync_refresh_and_diary_page(client, app, account):
-    assert client.post("/api/garmin/tokens", json={"tokens": '{"oops": 1}'}).status_code == 400
-    assert client.post("/api/garmin/tokens", json={"tokens": json.dumps(TOKENS)}).json() == {"status": "connected"}
+def test_sync_reuses_and_renews_tokens_and_fills_the_diary(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
     day = today()
+    account.wrapped_sleep = False
     result = client.post("/api/garmin/sync", json={"days": 2}).json()
-    assert result["days_synced"] == 2 and result["activities_synced"] == 1
-    assert any("max metrics" in w for w in result["warnings"])
-    with app.state.sessions() as db:
-        assert json.loads(app.state.garmin.decrypt(db.get(GarminAccount, 1).tokens))["di_token"] == "access-2"
+    assert result["days_synced"] == 2 and result["activities_synced"] == 1 and result["warnings"] == []
+    assert len(account.issued) == 1  # the token from linking is reused
+    # A token revoked early is replaced once, transparently.
+    account.revoked.add(account.issued[-1])
+    assert client.post("/api/garmin/sync", json={}).json()["days_synced"] == 1
+    assert len(account.issued) == 2
     health = client.get(f"/api/health/{day - timedelta(days=1)}").json()
     assert health["synced"] and health["summary"]["heart_rate"]["resting"] == 49
+    assert health["summary"]["sleep"]["score"] == 82 and health["summary"]["sleep"]["avg_overnight_hrv"] == 54
     assert health["activities"][0]["name"] == "Morning Run"
     page = client.get(f"/?date={day - timedelta(days=1)}").text
     assert "From your Garmin" in page and "11,234" in page and "7h 32m" in page and "Morning Run" in page
@@ -175,17 +154,27 @@ def test_token_paste_sync_refresh_and_diary_page(client, app, account):
     assert client.get(f"/api/health/{day - timedelta(days=1)}").json()["activities"] == []
 
 
+def test_activity_pages_are_followed(client, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    account.activities = [{**RUN, "activityId": 1000 + i, "startTimeLocal": f"{today()} 06:{i % 60:02d}:00"} for i in range(150)]
+    assert client.post("/api/garmin/sync", json={}).json()["activities_synced"] == 150
+
+
 def test_sync_errors_are_reported_and_disconnect_keeps_data(client, account):
     assert client.post("/api/garmin/sync", json={}).json()["detail"].startswith("Garmin isn’t connected")
-    client.post("/api/garmin/tokens", json={"tokens": json.dumps(TOKENS)})
+    client.post("/api/garmin/key", json={"api_key": KEY})
     assert client.post("/api/garmin/sync", json={"start": "2026-01-01", "end": "2026-03-01"}).status_code == 200
     assert client.post("/api/garmin/sync", json={"days": 93}).status_code == 422
-    account.fail = GarminConnectTooManyRequestsError("slow down")
+    account.fail = ApiError(429)
     assert "limiting" in client.post("/api/garmin/sync", json={}).json()["detail"]
+    account.fail = ApiError(500)
+    assert "HTTP 500" in client.post("/api/garmin/sync", json={}).json()["detail"]
     account.fail = None
-    account.tokens = {**account.tokens, "di_refresh_token": "revoked"}
+    # The key is deleted or expires in Garmin Connect.
+    account.valid_key = "another"
+    account.revoked.update(account.issued)
     assert client.post("/api/garmin/sync", json={}).status_code == 400
-    assert "Reconnect" in client.get("/api/garmin").json()["last_error"]
+    assert "Personal API key" in client.get("/api/garmin").json()["last_error"]
     assert client.post("/api/garmin/disconnect").json() == {"connected": False}
     status = client.get("/api/garmin").json()
     assert not status["connected"] and status["synced_days"]["count"] >= 30
@@ -203,11 +192,13 @@ def test_mcp_health_tools(client, account):
         assert not result.get("isError"), result
         return result.get("structuredContent", {}).get("result") or [json.loads(c["text"]) for c in result["content"]]
     assert call("sync_garmin", start="2026-11-01")["isError"]
-    client.post("/api/garmin/tokens", json={"tokens": json.dumps(TOKENS)})
+    client.post("/api/garmin/key", json={"api_key": KEY})
     day = (today() - timedelta(days=1)).isoformat()
     synced = call("sync_garmin", start=day)
     assert data(synced)[0]["days_synced"] == 1
     assert data(call("get_health_day", day=day))[0]["summary"]["sleep"]["score"] == 82
+    raw = data(call("get_health_day", day=day, include_raw=True))[0]["raw"]
+    assert raw["daily_summary"]["totalSteps"] == 11234 and raw["hrv"]["status"] == "BALANCED"
     assert data(call("get_health_range", start=day, end=day))[0]["synced"]
     assert data(call("get_activities", start=day, end=day))[0]["type"] == "running"
     assert call("get_health_range", start="2026-01-01", end="2026-03-01")["isError"]

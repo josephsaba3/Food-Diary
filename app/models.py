@@ -43,12 +43,12 @@ class AuthRecord(Base):
 
 
 class GarminAccount(Base):
-    """The single linked Garmin account. Tokens are Fernet-encrypted; the password is never stored."""
+    """The single linked Garmin account: Personal API key and current bearer token, both Fernet-encrypted."""
     __tablename__ = "garmin_account"
     id: Mapped[int] = mapped_column(primary_key=True)
-    tokens: Mapped[str] = mapped_column(Text)
-    display_name: Mapped[str | None] = mapped_column(String(255))
-    full_name: Mapped[str | None] = mapped_column(String(255))
+    api_key: Mapped[str] = mapped_column(Text)
+    access_token: Mapped[str | None] = mapped_column(Text)
+    token_expires_at: Mapped[int | None] = mapped_column(BigInteger)
     connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str] = mapped_column(Text, default="")
@@ -59,6 +59,8 @@ class HealthDay(Base):
     __tablename__ = "health_days"
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     summary: Mapped[str] = mapped_column(Text)
+    # Trimmed Garmin responses, kept so fields the summary doesn't map are still readable.
+    raw: Mapped[str] = mapped_column(Text, default="{}")
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -198,22 +198,10 @@ async function garminPost(url, body, button, done) {
   finally { if (button) button.disabled = false; }
 }
 const formBody = form => Object.fromEntries(new FormData(form));
-$("#garmin-login-form")?.addEventListener("submit", event => {
+document.querySelectorAll(".garmin-key-form").forEach(form => form.addEventListener("submit", event => {
   event.preventDefault();
-  garminPost("/api/garmin/login", formBody(event.target), event.submitter, result => {
-    $("#garmin-password").value = "";
-    if (result.status === "needs_mfa") { event.target.hidden = true; $("#garmin-mfa-form").hidden = false; $("#garmin-code").focus(); $("#garmin-status").textContent = ""; }
-    else location.reload();
-  });
-});
-$("#garmin-mfa-form")?.addEventListener("submit", event => {
-  event.preventDefault();
-  garminPost("/api/garmin/mfa", formBody(event.target), event.submitter, () => location.reload());
-});
-$("#garmin-token-form")?.addEventListener("submit", event => {
-  event.preventDefault();
-  garminPost("/api/garmin/tokens", formBody(event.target), event.submitter, () => location.reload());
-});
+  garminPost("/api/garmin/key", formBody(form), event.submitter, () => location.reload());
+}));
 $("#garmin-sync-form")?.addEventListener("submit", event => {
   event.preventDefault();
   garminPost("/api/garmin/sync", {days:Number($("#garmin-days").value)}, event.submitter, result => {

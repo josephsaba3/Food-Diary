@@ -10,11 +10,11 @@ depends_on = None
 
 def upgrade():
     op.create_table("garmin_account", sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("tokens", sa.Text, nullable=False), sa.Column("display_name", sa.String(255)),
-        sa.Column("full_name", sa.String(255)), sa.Column("connected_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("api_key", sa.Text, nullable=False), sa.Column("access_token", sa.Text),
+        sa.Column("token_expires_at", sa.BigInteger), sa.Column("connected_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_sync_at", sa.DateTime(timezone=True)), sa.Column("last_error", sa.Text, nullable=False))
     op.create_table("health_days", sa.Column("day", sa.Date, primary_key=True), sa.Column("summary", sa.Text, nullable=False),
-        sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False))
+        sa.Column("raw", sa.Text, nullable=False), sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False))
     op.create_table("health_activities", sa.Column("activity_id", sa.BigInteger, primary_key=True, autoincrement=False),
         sa.Column("day", sa.Date, nullable=False), sa.Column("summary", sa.Text, nullable=False),
         sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False))

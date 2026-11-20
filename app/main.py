@@ -25,14 +25,14 @@ from .garmin import GarminError, GarminLink
 from .mcp_server import build_mcp
 from .models import AuthRecord
 from .oauth import MCPAuthorization, OAuth
-from .schemas import CATEGORIES, Category, GarminLogin, GarminMFA, GarminSync, GarminTokens, MealInput, NoteInput
+from .schemas import CATEGORIES, Category, GarminKey, GarminSync, MealInput, NoteInput
 from .security import Security, local_next
 
 ROOT = Path(__file__).parent
 log = logging.getLogger("food_diary.garmin")
 
 
-def create_app(settings=None, garmin_client_factory=None):
+def create_app(settings=None, garmin_http=None):
     settings = settings or Settings.from_env()
     engine = make_engine(settings.database_url)
     sessions = session_factory(engine)
@@ -42,7 +42,7 @@ def create_app(settings=None, garmin_client_factory=None):
     templates.env.globals["asset"] = {name: f"/static/{name}?v={hashlib.sha256((ROOT / 'static' / name).read_bytes()).hexdigest()[:12]}"
                                       for name in ("app.css", "app.js")}
     oauth = OAuth(settings, sessions, security, templates)
-    link = GarminLink(settings, sessions, garmin_client_factory)
+    link = GarminLink(settings, sessions, garmin_http)
     templates.env.filters["hm"] = lambda minutes: f"{int(minutes) // 60}h {int(minutes) % 60:02d}m" if minutes is not None else ""
     templates.env.filters["localtime"] = lambda iso: datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.timezone)).strftime("%d %b, %-I:%M %p").lstrip("0") if iso else ""
     templates.env.filters["label"] = lambda value: str(value or "").replace("_", " ").capitalize()
@@ -199,20 +199,10 @@ def create_app(settings=None, garmin_client_factory=None):
         return link.status()
 
     # Plain `def` routes run in FastAPI's thread pool, so slow Garmin calls never block the event loop.
-    @app.post("/api/garmin/login", dependencies=[Depends(security.check_write)])
-    def garmin_login(request: Request, body: GarminLogin):
+    @app.post("/api/garmin/key", dependencies=[Depends(security.check_write)])
+    def garmin_key(request: Request, body: GarminKey):
         security.rate_limit(request, "garmin", limit=6)
-        return link.start_login(body.email, body.password)
-
-    @app.post("/api/garmin/mfa", dependencies=[Depends(security.check_write)])
-    def garmin_mfa(request: Request, body: GarminMFA):
-        security.rate_limit(request, "garmin", limit=6)
-        return link.finish_mfa(body.code)
-
-    @app.post("/api/garmin/tokens", dependencies=[Depends(security.check_write)])
-    def garmin_tokens(request: Request, body: GarminTokens):
-        security.rate_limit(request, "garmin", limit=6)
-        return link.import_tokens(body.tokens)
+        return link.save_key(body.api_key)
 
     @app.post("/api/garmin/sync", dependencies=[Depends(security.check_write)])
     def garmin_sync(body: GarminSync):

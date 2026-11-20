@@ -50,20 +50,9 @@ class NoteInput(BaseModel):
 
 
 
-class GarminLogin(BaseModel):
+class GarminKey(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=1, max_length=500)
-
-
-class GarminMFA(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    code: str = Field(min_length=4, max_length=12)
-
-
-class GarminTokens(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    tokens: str = Field(min_length=10, max_length=50_000)
+    api_key: str = Field(min_length=1, max_length=4000)
 
 
 class GarminSync(BaseModel):
