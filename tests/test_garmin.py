@@ -258,7 +258,9 @@ def test_health_page_states(client, app, account):
     account.empty_days = {(day - timedelta(days=n)).isoformat() for n in (0, 1, 2, 5)}
     client.post("/api/garmin/history", json={"days": 30})
     wait_for_job(app)
-    page = client.get("/health").text
+    default = client.get("/health").text
+    assert "of 1 day<" in default and 'value="1" checked' in default  # Health opens on today
+    page = client.get("/health?period=30").text
     assert "26 of 30 days" in page and "Steps per day" in page and "11,234" in page and "49.0" in page
     assert "No watch readings · 3 days" in page  # today and the two days before collapse into one row
     assert page.count("class=\"col sel\"") == 4  # the latest worn day is selected in all four charts
@@ -267,7 +269,7 @@ def test_health_page_states(client, app, account):
     custom = client.get(f"/health?start={day - timedelta(days=200)}&end={day}").text
     assert "of 93 days" in custom
     chosen = day - timedelta(days=10)
-    assert f'id="sel-view" href="/?date={chosen}"' in client.get(f"/health?day={chosen}").text
+    assert f'id="sel-view" href="/?date={chosen}"' in client.get(f"/health?period=30&day={chosen}").text
     diary = client.get(f"/?date={day - timedelta(days=3)}").text
     assert "See how this compares over 30 days" in diary
 

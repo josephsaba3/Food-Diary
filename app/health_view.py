@@ -7,7 +7,8 @@ a resting heart rate. Averages use worn days only.
 import math
 from datetime import date, timedelta
 
-PERIODS = (7, 30, 90)
+PERIODS = (1, 7, 30, 90)
+DEFAULT_PERIOD = 1
 MAX_DAYS = 93
 LOG_PREVIEW = 10
 
@@ -21,6 +22,8 @@ def long(d):
 
 
 def range_label(start, end):
+    if start == end:
+        return f"{end.day} {end:%b %Y}"
     if start.year != end.year:
         return f"{start.day} {start:%b %Y} – {end.day} {end:%b %Y}"
     if start.month == end.month:
@@ -55,7 +58,7 @@ def resolve_period(today, period=None, start=None, end=None):
             start = end - timedelta(days=MAX_DAYS - 1)
         key = str((end - start).days + 1) if end == today and (end - start).days + 1 in PERIODS else "custom"
         return start, end, key
-    days = period if period in PERIODS else 30
+    days = period if period in PERIODS else DEFAULT_PERIOD
     return today - timedelta(days=days - 1), today, str(days)
 
 
