@@ -65,6 +65,8 @@
       </dl>
     </section>
 
+    {% if v.n == 1 %}{% include "_timeline.html" %}{% endif %}
+
     {% set sel = v.days[v.selected] %}
     {% set c = v.charts %}
     <section class="trend-section" aria-labelledby="trend-heading">
@@ -111,6 +113,8 @@
       </div>
       <p class="small muted chart-key desktop-only"><span class="key"><i class="key-avg"></i>Period average</span><span class="key"><i class="key-workout"></i>Workout</span><span class="key"><i class="key-gap"></i>No readings</span></p>
     </section>
+
+    {% if v.n > 1 %}{% include "_timeline.html" %}{% endif %}
 
     <section class="log-section" aria-labelledby="log-heading">
       <div class="section-heading health-heading"><h2 id="log-heading">Daily log</h2><span class="small muted">Newest first</span></div>

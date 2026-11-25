@@ -20,7 +20,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, func, select
 
-from .models import GarminAccount, HealthActivity, HealthDay, utcnow
+from .models import GarminAccount, HealthActivity, HealthDay, HealthTimeline, utcnow
 
 BASE_URL = os.getenv("GARMIN_PERSONAL_API_BASE_URL", "https://personal.connectapi.garmin.com").rstrip("/")
 TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
@@ -29,6 +29,7 @@ TOKEN_REFRESH_WINDOW = 3600  # Get a fresh token when less than an hour remains,
 ACTIVITY_PAGE_SIZE = 100
 CHUNK_DAYS = 31        # Longer downloads run as a background job in chunks of this size.
 MAX_HISTORY_DAYS = 731 # Two years.
+SLOT_MINUTES = 15     # Heart rate and Body Battery are kept through the day in slots this long.
 
 
 class GarminError(RuntimeError):
@@ -227,6 +228,121 @@ def summarize_activity(activity):
     })
 
 
+# ---- through the day: heart rate and Body Battery in 15-minute slots -------------
+
+def utc_moment(value):
+    """Garmin timestamps arrive as epoch milliseconds, zone-less ISO strings in UTC, or {"date": "..."} objects."""
+    if isinstance(value, dict):
+        value = value.get("date")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    return None
+
+
+def wall_clock(value):
+    """A '*TimestampLocal' string as naive wall-clock time."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def local_clock(payload, tz):
+    """Map UTC moments to the watch's wall clock for one day.
+
+    The response's start times give the watch's UTC offset that day. When it matches the diary's
+    timezone, that zone is used so a daylight-saving change mid-day lands correctly; otherwise
+    (travelling) the watch's fixed offset is used.
+    """
+    start_utc = utc_moment((payload or {}).get("startTimestampGMT"))
+    start_local = wall_clock((payload or {}).get("startTimestampLocal"))
+    if start_utc and start_local:
+        offset = start_local - start_utc.replace(tzinfo=None)
+        if start_utc.astimezone(tz).utcoffset() != offset:
+            return lambda moment: (moment + offset).replace(tzinfo=None)
+    return lambda moment: moment.astimezone(tz).replace(tzinfo=None)
+
+
+def value_rows(payload, values_key, descriptors_key, index_key, name_key):
+    """Yield each sample row as {column name: value}, using Garmin's column descriptors."""
+    columns = {}
+    for item in (payload or {}).get(descriptors_key) or []:
+        if isinstance(item, dict) and isinstance(item.get(index_key), int) and item.get(name_key):
+            columns[str(item[name_key])] = item[index_key]
+    for row in (payload or {}).get(values_key) or []:
+        if isinstance(row, list):
+            yield row, {name: row[i] if 0 <= i < len(row) else None for name, i in columns.items()}
+
+
+def _number(value, low, high):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high else None
+
+
+def build_timeline(day, heart=None, battery=None, tz=timezone.utc):
+    """Fold Garmin's 2-minute heart rate and Body Battery readings into 15-minute slots of the watch's local day.
+
+    Each slot has the average, lowest and highest heart rate and the last Body Battery reading in it.
+    Slots with no readings are left out.
+    """
+    slots = {}
+
+    def slot(moment, clock):
+        if moment is None:
+            return None
+        local = clock(moment)
+        if local.date() != day:
+            return None
+        return slots.setdefault((local.hour * 60 + local.minute) // SLOT_MINUTES, {"hr": [], "bb": []})
+
+    if isinstance(heart, dict):
+        clock = local_clock(heart, tz)
+        for row, named in value_rows(heart, "heartRateValues", "heartRateValueDescriptors", "index", "key"):
+            stamp = named.get("timestamp", row[0] if row else None)
+            bpm = _number(named.get("heartrate", row[1] if len(row) > 1 else None), 20, 250)
+            target = slot(utc_moment(stamp), clock) if bpm is not None else None
+            if target is not None:
+                target["hr"].append(bpm)
+    if isinstance(battery, dict):
+        clock = local_clock(battery, tz)
+        readings = []
+        for row, named in value_rows(battery, "bodyBatteryValuesArray", "bodyBatteryValueDescriptorDTOList",
+                                     "bodyBatteryValueDescriptorIndex", "bodyBatteryValueDescriptorKey"):
+            stamp = named.get("timestamp", row[0] if row else None)
+            if "bodyBatteryLevel" in named:
+                level = named["bodyBatteryLevel"]
+            else:  # undescribed rows are [timestamp, level] or [timestamp, status, level, version]
+                level = row[2] if len(row) >= 4 else row[1] if len(row) > 1 else None
+            level, moment = _number(level, 0, 100), utc_moment(stamp)
+            if level is not None and moment is not None:
+                readings.append((moment, level))
+        for moment, level in sorted(readings):
+            target = slot(moment, clock)
+            if target is not None:
+                target["bb"].append(level)
+    out = []
+    for index in sorted(slots):
+        hr, bb = slots[index]["hr"], slots[index]["bb"]
+        if not hr and not bb:
+            continue
+        minutes = index * SLOT_MINUTES
+        entry = {"time": f"{minutes // 60:02d}:{minutes % 60:02d}"}
+        if hr:
+            entry.update(hr=round(sum(hr) / len(hr)), hr_min=round(min(hr)), hr_max=round(max(hr)))
+        if bb:
+            entry["body_battery"] = round(bb[-1])
+        out.append(entry)
+    return out
+
 # ---- reading the cache ----------------------------------------------------------
 
 def activities_between(session, start, end):
@@ -262,6 +378,18 @@ def health_range(session, start, end):
     return days
 
 
+def health_timeline(session, day, start=None, end=None):
+    """A day's 15-minute slots, optionally only those starting between two HH:MM times (inclusive)."""
+    row = session.get(HealthTimeline, day)
+    slots = json.loads(row.slots) if row else []
+    if start:
+        slots = [s for s in slots if s["time"] >= start]
+    if end:
+        slots = [s for s in slots if s["time"] <= end]
+    return {"date": day.isoformat(), "available": row is not None,
+            "synced_at": row.synced_at.isoformat() if row else None,
+            "interval_minutes": SLOT_MINUTES, "slots": slots}
+
 # ---- the link -------------------------------------------------------------------
 
 class GarminLink:
@@ -281,9 +409,12 @@ class GarminLink:
         except InvalidToken:
             return None
 
-    def today(self):
+    def zone(self):
         from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo(self.settings.timezone)).date()
+        return ZoneInfo(self.settings.timezone)
+
+    def today(self):
+        return datetime.now(self.zone()).date()
 
     def connected(self):
         with self.sessions() as db:
@@ -400,6 +531,16 @@ class GarminLink:
                 generic = (entry or {}).get("generic") or {}
                 if generic.get("calendarDate"):
                     vo2_by_day[generic["calendarDate"]] = entry
+            battery_by_day = {}
+            piece = start
+            while piece <= end:  # Garmin serves Body Battery reports for at most 31 days per request.
+                piece_end = min(end, piece + timedelta(days=30))
+                for report in self._optional(warnings, "Body Battery", "/wellness-service/wellness/bodyBattery/reports/daily",
+                                             {"startDate": piece.isoformat(), "endDate": piece_end.isoformat()}) or []:
+                    if isinstance(report, dict) and report.get("date"):
+                        battery_by_day[str(report["date"])[:10]] = report
+                piece = piece_end + timedelta(days=1)
+            tz = self.zone()
             for offset in range((end - start).days + 1):
                 day = start + timedelta(days=offset)
                 iso = day.isoformat()
@@ -410,6 +551,8 @@ class GarminLink:
                     if on_day:
                         on_day()
                     continue
+                heart = self._optional(warnings, f"{iso}: heart rate", "/wellness-service/wellness/dailyHeartRate", {"date": iso})
+                slots = build_timeline(day, heart, battery_by_day.get(iso), tz)
                 vo2 = vo2_by_day.get(iso)
                 summary = summarize_day(stats if isinstance(stats, dict) else None, sleep if isinstance(sleep, dict) else None,
                                         hrv if isinstance(hrv, dict) else None, None, [vo2] if vo2 else None)
@@ -417,6 +560,10 @@ class GarminLink:
                             "vo2max": vo2})
                 with self.sessions.begin() as db:
                     db.merge(HealthDay(day=day, summary=json.dumps(summary), raw=json.dumps(raw), synced_at=utcnow()))
+                    if slots:
+                        db.merge(HealthTimeline(day=day, slots=json.dumps(slots, separators=(",", ":")), synced_at=utcnow()))
+                    else:
+                        db.execute(delete(HealthTimeline).where(HealthTimeline.day == day))
                 synced += 1
                 if on_day:
                     on_day()

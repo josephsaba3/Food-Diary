@@ -205,3 +205,120 @@ def build(health_days, start, end, today):
     return {"start": start, "end": end, "label": range_label(start, end), "days": days, "n": n,
             "worn_count": len(worn), "averages": averages, "selected": selected, "columns": columns,
             "charts": charts, "rows": rows, "log_preview": LOG_PREVIEW, "client": client}
+
+
+# ---- through the day ------------------------------------------------------------
+
+DAY_MINUTES = 1440
+
+
+def _clock(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _minutes(hhmm):
+    try:
+        hours, mins = hhmm[:5].split(":")
+        return int(hours) * 60 + int(mins)
+    except (AttributeError, ValueError):
+        return None
+
+
+def _runs(points):
+    """Split (slot minute, ...) points into runs of back-to-back slots so gaps in wear stay gaps."""
+    runs, current, last = [], [], None
+    for point in points:
+        if last is not None and point[0] - last > 15:
+            runs.append(current)
+            current = []
+        current.append(point)
+        last = point[0]
+    if current:
+        runs.append(current)
+    return runs
+
+
+def timeline(day, slots, activities=(), meals=None):
+    """Geometry for the 15-minute heart rate and Body Battery charts of one day (SVG viewBox 0 0 1440 100)."""
+    def x(minute):
+        return minute + 7.5  # centre of the 15-minute slot
+
+    rows = [(_minutes(s["time"]), s) for s in slots if _minutes(s.get("time")) is not None]
+    heart = [(m, s["hr"], s.get("hr_min", s["hr"]), s.get("hr_max", s["hr"])) for m, s in rows if s.get("hr") is not None]
+    battery = [(m, s["body_battery"]) for m, s in rows if s.get("body_battery") is not None]
+
+    hr_lo = hr_hi = None
+    hr_band = hr_line = ""
+    hr_lines = []
+    if heart:
+        hr_lo = max(0, math.floor((min(h[2] for h in heart) - 5) / 10) * 10)
+        hr_hi = math.ceil((max(h[3] for h in heart) + 5) / 10) * 10
+        y = lambda v: 100 - pct(v, hr_lo, hr_hi)
+        band, line = [], []
+        for run in _runs(heart):
+            top = [f"{x(m):.1f} {y(hi):.1f}" for m, _, _, hi in run]
+            bottom = [f"{x(m):.1f} {y(lo):.1f}" for m, _, lo, _ in reversed(run)]
+            if len(run) == 1:  # a lone slot still needs width to be seen
+                m, _, lo, hi = run[0]
+                top = [f"{m + 2:.1f} {y(hi):.1f}", f"{m + 13:.1f} {y(hi):.1f}"]
+                bottom = [f"{m + 13:.1f} {y(lo):.1f}", f"{m + 2:.1f} {y(lo):.1f}"]
+            band.append("M" + " L".join(top + bottom) + " Z")
+            line.append("M" + " L".join(f"{x(m):.1f} {y(avg):.1f}" for m, avg, _, _ in run))
+        hr_band, hr_line = " ".join(band), " ".join(line)
+        step = 20 if hr_hi - hr_lo > 60 else 10
+        hr_lines = [{"bottom": pct(v, hr_lo, hr_hi), "label": str(v)}
+                    for v in range(hr_lo + step, hr_hi, step)]
+
+    bb_line = bb_area = ""
+    if battery:
+        y = lambda v: 100 - v
+        line, area = [], []
+        for run in _runs(battery):
+            points = [f"{x(m):.1f} {y(v):.1f}" for m, v in run]
+            if len(run) == 1:
+                m, v = run[0]
+                points = [f"{m + 2:.1f} {y(v):.1f}", f"{m + 13:.1f} {y(v):.1f}"]
+            line.append("M" + " L".join(points))
+            first, last = points[0].split()[0], points[-1].split()[0]
+            area.append(f"M{first} 100 L" + " L".join(points) + f" L{last} 100 Z")
+        bb_line, bb_area = " ".join(line), " ".join(area)
+
+    spans = []
+    for a in activities or ():
+        start = _minutes((a.get("start") or "")[11:16])
+        if start is None or not (a.get("start") or "").startswith(day.isoformat()):
+            continue
+        length = max(5, round(a.get("duration_minutes") or 0))
+        end = min(DAY_MINUTES, start + length)
+        name = a.get("name") or (a.get("type") or "workout").replace("_", " ").capitalize()
+        spans.append({"left": start / DAY_MINUTES * 100, "width": max(0.4, (end - start) / DAY_MINUTES * 100),
+                      "label": f"{name}, {_clock(start)}–{_clock(end % DAY_MINUTES)}"})
+
+    marks = []
+    for category, meal in (meals or {}).items():
+        at = _minutes(meal.get("time") or "")
+        if at is not None:
+            marks.append({"left": (at + 0.5) / DAY_MINUTES * 100, "time": _clock(at),
+                          "label": f"{category.capitalize()} {_clock(at)}"})
+    marks.sort(key=lambda m: m["left"])
+
+    hr_values = [h[1] for h in heart]
+    peak = max(heart, key=lambda h: h[3]) if heart else None
+    summary = {
+        "hr": f"{min(h[2] for h in heart)}–{max(h[3] for h in heart)}" if heart else None,
+        "hr_peak": f"Peak {peak[3]} bpm at {_clock(peak[0])}" if peak else None,
+        "hr_avg": round(sum(hr_values) / len(hr_values)) if hr_values else None,
+        "bb": f"{battery[0][1]} → {battery[-1][1]}" if battery else None,
+        "bb_range": (lambda hi, lo: f"High {hi[1]} at {_clock(hi[0])} · low {lo[1]} at {_clock(lo[0])}")(
+            max(battery, key=lambda b: b[1]), min(battery, key=lambda b: b[1])) if battery else None,
+    }
+    return {
+        "iso": day.isoformat(), "long": long(day), "has_data": bool(slots),
+        "slots": slots, "summary": summary,
+        "hr_band": hr_band, "hr_line": hr_line, "hr_lines": hr_lines,
+        "bb_line": bb_line, "bb_area": bb_area,
+        "spans": spans, "meals": marks,
+        "axis": [{"left": h / 24 * 100, "text": f"{h:02d}:00" if h < 24 else "24:00",
+                  "align": "start" if h == 0 else "end" if h == 24 else "center"} for h in (0, 6, 12, 18, 24)],
+        "hr_lo": hr_lo, "hr_hi": hr_hi,
+    }
