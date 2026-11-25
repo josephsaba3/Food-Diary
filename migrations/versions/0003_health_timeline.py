@@ -1,4 +1,4 @@
-"""Garmin heart rate, Body Battery and stress in 15-minute slots, with timed Body Battery events."""
+"""Garmin heart rate and Body Battery in 15-minute slots."""
 from alembic import op
 import sqlalchemy as sa
 
@@ -10,7 +10,7 @@ depends_on = None
 
 def upgrade():
     op.create_table("health_timelines", sa.Column("day", sa.Date, primary_key=True), sa.Column("slots", sa.Text, nullable=False),
-        sa.Column("events", sa.Text, nullable=False, server_default="[]"), sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False))
+        sa.Column("synced_at", sa.DateTime(timezone=True), nullable=False))
 
 
 def downgrade():
