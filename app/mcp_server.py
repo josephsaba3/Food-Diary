@@ -116,8 +116,8 @@ def build_mcp(settings, sessions, link):
         """Read a day's heart rate, Body Battery, stress and steps in 15-minute slots of the watch's local time, plus workouts.
 
         Each slot has time (its start, HH:MM), hr (average bpm), hr_min, hr_max, body_battery (the last reading in
-        the slot) and, when Garmin shares them, steps and stress and stress_max (0-100: 0-25 rest, 26-50 low,
-        51-75 medium, 76-100 high); slots without readings are omitted. events are Garmin's timed Body Battery events (type
+        the slot) and, when the owner has signed in to their Garmin account in Settings, steps and stress and
+        stress_max (0-100: 0-25 rest, 26-50 low, 51-75 medium, 76-100 high); slots without readings are omitted. events are Garmin's timed Body Battery events (type
         stress, recovery, activity, sleep or nap, start/end HH:MM, body_battery_impact), which show stressful
         periods even when 15-minute stress levels aren't available. start_time/end_time (HH:MM) keep only slots
         and events in that window, e.g. the hours after a meal's time. Daily totals are in get_health_day.

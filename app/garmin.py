@@ -20,7 +20,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, func, select
 
-from .models import GarminAccount, HealthActivity, HealthDay, HealthTimeline, utcnow
+from .models import AuthRecord, GarminAccount, HealthActivity, HealthDay, HealthTimeline, utcnow
 
 BASE_URL = os.getenv("GARMIN_PERSONAL_API_BASE_URL", "https://personal.connectapi.garmin.com").rstrip("/")
 TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
@@ -36,6 +36,8 @@ BACKOFF = (60, 120, 240, 480, 900, 900)  # waits when Garmin says to slow down: 
 MAX_HISTORY_DAYS = 731 # Two years.
 SLOT_MINUTES = 15     # Heart rate, Body Battery, stress and steps are kept through the day in slots this long.
 TIMELINE_VERSION = 2  # Bump when timelines gain data, so downloads fetch older days again.
+ACCOUNT_TIMELINE_VERSION = 3  # ...and this one marks days fetched with the Garmin account (steps and stress)
+MFA_SECONDS = 600     # how long a Garmin sign-in waits for its MFA code
 
 
 class GarminError(RuntimeError):
@@ -491,6 +493,15 @@ def describe_error(error):
     return f"HTTP {error.status}" + (f": {text}" if text else "")
 
 
+class _SignedOut(Exception):
+    """Garmin rejected the saved account sign-in."""
+
+
+class _Failed:
+    def __init__(self, message):
+        self.message = message
+
+
 # ---- the link -------------------------------------------------------------------
 
 class GarminLink:
@@ -501,7 +512,8 @@ class GarminLink:
         self.fernet = Fernet(base64.urlsafe_b64encode(key))
         self.lock = threading.Lock()
         # Data Garmin keeps but doesn't list for the Personal API: kind -> working candidate, or False once refused.
-        self.details, self.profile_name, self.battery_chunks = {}, None, None
+        self.battery_chunks = None  # whether Garmin's 15-minute Body Battery answer is readable (None: not asked yet)
+        self.account_factory, self.account_client, self.account_tokens, self.account_retry_at = None, None, None, 0.0
         self.probes = {}  # what Garmin answered when each kind of 15-minute data was first tried, for the status
         # Request pacing. Background downloads space requests out and wait out Garmin's rate limit
         # ("patient"); a sync someone is waiting on uses a short gap and reports the limit at once.
@@ -540,6 +552,7 @@ class GarminLink:
                 "last_error": (account.last_error or None) if account else None,
                 "synced_days": {"count": count, "first": first.isoformat() if first else None, "last": last.isoformat() if last else None},
                 "history_download": self.job_status(),
+                "account": self.account_status(),
                 "fifteen_minute_data": self.probe_report(),
             }
 
@@ -591,7 +604,10 @@ class GarminLink:
         return token
 
     def _get(self, path, params=None, renew=True):
-        """GET with pacing; in background downloads, wait and retry when Garmin says to slow down (HTTP 429)."""
+        return self._paced(lambda: self._fetch(path, params, renew))
+
+    def _paced(self, request):
+        """Run a Garmin request with pacing; in background downloads, wait and retry when Garmin says to slow down."""
         attempt = 0
         while True:
             wait = self.last_request + self.gap - time.monotonic()
@@ -599,7 +615,7 @@ class GarminLink:
                 self.sleep(wait)
             self.last_request = time.monotonic()
             try:
-                return self._fetch(path, params, renew)
+                return request()
             except ApiError as error:
                 if error.status != 429 or not self.patient or attempt >= len(BACKOFF):
                     raise
@@ -656,78 +672,192 @@ class GarminLink:
                 warnings.append(f"{label} unavailable (HTTP {error.status})")
             return None
 
-    def _detail(self, kind, candidates, valid):
-        """Data Garmin keeps but doesn't list for the Personal API (stress and steps through the day).
-
-        Each candidate (path, params) is tried until one answers in the expected shape; that one is then used
-        for the rest of the process. If none does, the kind is switched off until restart, so it costs one
-        request per candidate. Network failures and rate limits still stop the sync as usual.
-        """
-        state = self.details.get(kind)
-        if state is False:
-            return None
-        attempts = []
-        for index in ([state] if isinstance(state, int) else range(len(candidates))):
-            path, params = candidates[index]
-            request = path.replace(self.profile_name, "{displayName}") if self.profile_name else path
-            request += "?" + "&".join(f"{k}=…" for k in params) if params else ""
-            try:
-                data = self._get(path, params, renew=False)
-            except ApiError as error:
-                if error.status in (0, 429):
-                    raise
-                if isinstance(state, int):
-                    return None  # it has worked before: this day just has nothing
-                attempts.append({"request": request, "answer": describe_error(error)})
-                continue
-            if valid(data):
-                self.details[kind] = index
-                if not isinstance(state, int):
-                    self._probed(kind, "available", attempts + [{"request": request, "answer": describe_answer(data)}])
-                return data
-            if isinstance(state, int):
-                return None
-            attempts.append({"request": request, "answer": describe_answer(data) + " (not the expected shape)"})
-        self.details[kind] = False
-        self._probed(kind, "not available", attempts)
-        return None
-
     def _probed(self, kind, result, attempts):
         self.probes[kind] = {"result": result, "checked_at": utcnow().isoformat(), "attempts": attempts}
 
     def probe_report(self):
-        """What Garmin said when steps, stress and Body Battery every 15 minutes were first asked for since the server
-        started. Shapes only (field names, list lengths), never values."""
-        report = {kind: self.probes.get(kind, {"result": "not tried since the server started"})
-                  for kind in ("steps", "stress", "body_battery", "display_name")}
+        """What Garmin answered when 15-minute data was first fetched since the server started.
+        Shapes only (field names, list lengths), never values."""
+        report = {"body_battery": self.probes.get("body_battery", {"result": "not tried since the server started"})}
+        linked = self.account_status()["linked"]
+        for kind in ("steps", "stress"):
+            report[kind] = self.probes.get(kind) or {"result": "not tried since the server started" if linked else
+                                                     "needs your Garmin account: Garmin’s Personal API answers HTTP 404"}
         return report
 
-    def _display_name(self):
-        if self.profile_name is None:
-            request = "/userprofile-service/userprofile/settings"
-            try:
-                settings = self._get(request)
-            except ApiError as error:
-                if error.status in (0, 429):
-                    raise
-                settings, answer = None, describe_error(error)
-            else:
-                answer = describe_answer(settings)
-            self.profile_name = str((settings or {}).get("displayName") or "") if isinstance(settings, dict) else ""
-            self._probed("display_name", "found" if self.profile_name else "not found", [{"request": request, "answer": answer}])
-        return self.profile_name
+    # Garmin account sign-in (steps and stress every 15 minutes) ----------------------
 
-    def _stress_detail(self, iso):
-        return self._detail("stress", [(f"/wellness-service/wellness/dailyStress/{iso}", None)],
-                            lambda data: isinstance(data, dict) and isinstance(data.get("stressValuesArray"), list))
+    def account_status(self):
+        with self.sessions() as db:
+            account = db.get(GarminAccount, 1)
+            linked = bool(account and account.account_tokens)
+            return {"linked": linked,
+                    "linked_at": account.account_linked_at.isoformat() if linked and account.account_linked_at else None,
+                    "error": (account.account_error or None) if linked else None}
 
-    def _steps_detail(self, iso):
-        if self.details.get("steps") is False:
+    def _new_account_client(self, **values):
+        if self.account_factory:
+            return self.account_factory(**values)
+        from garminconnect import Garmin
+        return Garmin(retry_attempts=1, **values)
+
+    @staticmethod
+    def _account_error(error):
+        """A GarminError with a message for the person signing in, from the Garmin library's exceptions."""
+        name = type(error).__name__
+        if name == "GarminConnectTooManyRequestsError":
+            return GarminError("Garmin is limiting sign-ins right now. Wait 15 minutes or so and try again.")
+        if name == "GarminConnectAuthenticationError":
+            return GarminError("Garmin didn’t accept that email and password, or the code. Check them and try again.")
+        return GarminError("Couldn’t sign in to Garmin. Garmin may be blocking sign-ins from this server; try again later.")
+
+    def account_login(self, email, password):
+        """Sign in with the Garmin account's email and password. The password goes to Garmin only and isn't kept.
+        Returns {"needs_mfa": True} when Garmin sends a code; finish with account_mfa."""
+        if not self.connected():
+            raise GarminError("Link your Personal API key first.")
+        email, password = (email or "").strip(), password or ""
+        if "@" not in email or not password:
+            raise GarminError("Enter the email and password you use for Garmin Connect.")
+        client = self._new_account_client(email=email, password=password, return_on_mfa=True)
+        try:
+            status, state = client.login()
+        except Exception as error:
+            raise self._account_error(error) from None
+        finally:
+            password = None
+        if status == "needs_mfa":
+            with self.sessions.begin() as db:
+                db.merge(AuthRecord(key="garmin-account-mfa", kind="garmin-mfa", payload=self.encrypt(json.dumps(state)),
+                                    expires_at=int(time.time()) + MFA_SECONDS))
+            return {"needs_mfa": True}
+        self._save_account(client)
+        return {"linked": True}
+
+    def account_mfa(self, code):
+        code = "".join((code or "").split())
+        if not code.isdigit():
+            raise GarminError("Enter the code Garmin sent you.")
+        with self.sessions() as db:
+            record = db.get(AuthRecord, "garmin-account-mfa")
+            state = self.decrypt(record.payload) if record and record.expires_at > time.time() else None
+        if not state:
+            raise GarminError("That sign-in has expired. Start again with your email and password.")
+        client = self._new_account_client(return_on_mfa=True)
+        try:
+            client.resume_login(json.loads(state), code)
+        except Exception as error:
+            raise self._account_error(error) from None
+        with self.sessions.begin() as db:
+            db.execute(delete(AuthRecord).where(AuthRecord.key == "garmin-account-mfa"))
+        self._save_account(client)
+        return {"linked": True}
+
+    def account_unlink(self):
+        with self.sessions.begin() as db:
+            account = db.get(GarminAccount, 1)
+            if account:
+                account.account_tokens, account.account_linked_at, account.account_error = None, None, ""
+        self.account_client, self.account_tokens = None, None
+        return {"linked": False}
+
+    def _save_account(self, client):
+        tokens = client.client.dumps()
+        with self.sessions.begin() as db:
+            account = db.get(GarminAccount, 1)
+            if account is None:
+                raise GarminError("Link your Personal API key first.")
+            account.account_tokens = self.encrypt(tokens)
+            account.account_linked_at, account.account_error = utcnow(), ""
+        self.account_client, self.account_tokens, self.account_retry_at = client, tokens, 0.0
+        self.probes.pop("steps", None)
+        self.probes.pop("stress", None)
+
+    def _account_problem(self, message):
+        with self.sessions.begin() as db:
+            account = db.get(GarminAccount, 1)
+            if account and account.account_tokens:
+                account.account_error = message
+
+    def _account(self):
+        """The signed-in Garmin account client for this sync, or None. Tokens refresh themselves; _keep_account saves them."""
+        if self.account_client is not None:
+            return self.account_client
+        with self.sessions() as db:
+            account = db.get(GarminAccount, 1)
+            tokens = self.decrypt(account.account_tokens) if account and account.account_tokens else None
+        if not tokens:
             return None
-        name = self._display_name()
-        candidates = ([(f"/wellness-service/wellness/dailySummaryChart/{name}", {"date": iso})] if name else []) + \
-                     [("/wellness-service/wellness/dailySummaryChart", {"date": iso})]
-        return self._detail("steps", candidates, lambda data: isinstance(data, list))
+        if time.monotonic() < self.account_retry_at:
+            return None  # it failed a moment ago; don't sign in again for every day of a download
+        client = self._new_account_client()
+        try:
+            result = self._paced(lambda: self._account_call(lambda: client.login(tokenstore=tokens)))
+        except _SignedOut:
+            self._account_problem("Garmin signed the diary out of your account. Sign in again in Settings to keep "
+                                  "steps and stress every 15 minutes.")
+            return None
+        if isinstance(result, _Failed):
+            self.account_retry_at = time.monotonic() + 900
+            for kind in ("steps", "stress"):
+                self._probed(kind, "error", [{"request": "Garmin account: login(saved tokens)", "answer": result.message}])
+            return None
+        self.account_client, self.account_tokens = client, tokens
+        return client
+
+    def _keep_account(self):
+        """Save refreshed sign-in tokens so the next start doesn't need a new sign-in."""
+        client = self.account_client
+        if client is None:
+            return
+        try:
+            tokens = client.client.dumps()
+        except Exception:
+            return
+        if tokens != self.account_tokens:
+            with self.sessions.begin() as db:
+                account = db.get(GarminAccount, 1)
+                if account and account.account_tokens:
+                    account.account_tokens = self.encrypt(tokens)
+            self.account_tokens = tokens
+
+    def _account_call(self, call):
+        """Run a Garmin library call, turning its exceptions into the sync's own: rate limits become HTTP 429 (so
+        background downloads wait them out), 'not found' means no data, a rejected sign-in stops account use."""
+        try:
+            return call()
+        except Exception as error:
+            name = type(error).__name__
+            if name == "GarminConnectTooManyRequestsError":
+                raise ApiError(429) from None
+            if name == "GarminConnectNotFoundError":
+                return None
+            if name == "GarminConnectAuthenticationError":
+                raise _SignedOut() from None
+            return _Failed(f"{name}: {' '.join(str(error).split())[:160]}")
+
+    def _account_data(self, kind, iso, valid):
+        """Steps or stress for a day from the Garmin account, or None."""
+        client = self._account()
+        if client is None:
+            return None
+        method = client.get_steps_data if kind == "steps" else client.get_stress_data
+        try:
+            data = self._paced(lambda: self._account_call(lambda: method(iso)))
+        except _SignedOut:
+            self.account_client = None
+            self._account_problem("Garmin signed the diary out of your account. Sign in again in Settings to keep "
+                                  "steps and stress every 15 minutes.")
+            return None
+        request = f"Garmin account: {'get_steps_data' if kind == 'steps' else 'get_stress_data'}(date)"
+        if isinstance(data, _Failed):
+            if kind not in self.probes:
+                self._probed(kind, "error", [{"request": request, "answer": data.message}])
+            return None
+        if kind not in self.probes:
+            self._probed(kind, "available" if valid(data) else "unexpected answer",
+                         [{"request": request, "answer": describe_answer(data)}])
+        return data if valid(data) else None
 
     def _battery_reports(self, warnings, start, end):
         """Body Battery reports by date. Asks for the lowest and highest reading in each 15-minute interval
@@ -787,8 +917,8 @@ class GarminLink:
                         on_day()
                     continue
                 heart = self._optional(warnings, f"{iso}: heart rate", "/wellness-service/wellness/dailyHeartRate", {"date": iso})
-                stress = self._stress_detail(iso)
-                steps = self._steps_detail(iso)
+                stress = self._account_data("stress", iso, lambda d: isinstance(d, dict) and isinstance(d.get("stressValuesArray"), list))
+                steps = self._account_data("steps", iso, lambda d: isinstance(d, list))
                 slots = build_timeline(day, heart, battery_by_day.get(iso), tz, stress, steps)
                 events = battery_events(day, battery_by_day.get(iso), tz)
                 vo2 = vo2_by_day.get(iso)
@@ -801,7 +931,8 @@ class GarminLink:
                     if slots or events:
                         db.merge(HealthTimeline(day=day, slots=json.dumps(slots, separators=(",", ":")),
                                                 events=json.dumps(events, separators=(",", ":")),
-                                                version=TIMELINE_VERSION, synced_at=utcnow()))
+                                                version=ACCOUNT_TIMELINE_VERSION if self.account_client else TIMELINE_VERSION,
+                                                synced_at=utcnow()))
                     else:
                         db.execute(delete(HealthTimeline).where(HealthTimeline.day == day))
                 synced += 1
@@ -835,7 +966,9 @@ class GarminLink:
             stopped.status = getattr(error, "status", None)
             self._record_error(str(stopped))
             if not synced:
+                self._keep_account()
                 raise stopped from error
+        self._keep_account()
         if stopped is None:
             with self.sessions.begin() as db:
                 account = db.get(GarminAccount, 1)
@@ -857,8 +990,10 @@ class GarminLink:
         with self.sessions() as db:
             synced = dict(db.execute(select(HealthDay.day, HealthDay.synced_at)
                                      .where(HealthDay.day >= start, HealthDay.day <= end)).all())
+            account = db.get(GarminAccount, 1)
+            wanted = ACCOUNT_TIMELINE_VERSION if account and account.account_tokens and not account.account_error else TIMELINE_VERSION
             timelines = set(db.scalars(select(HealthTimeline.day).where(HealthTimeline.day >= start, HealthTimeline.day <= end,
-                                                                        HealthTimeline.version >= TIMELINE_VERSION)))
+                                                                        HealthTimeline.version >= wanted)))
         done = set()
         for day, at in synced.items():
             settled = datetime.combine(day + timedelta(days=1), datetime.min.time()).replace(hour=6, tzinfo=zone)

@@ -62,6 +62,18 @@ class GarminHistory(BaseModel):
     days: int = Field(default=180, ge=1, le=731)
 
 
+class GarminAccountLogin(BaseModel):
+    """Garmin Connect email and password: passed to Garmin's sign-in once, never stored or logged."""
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=1000, repr=False)
+
+
+class GarminAccountCode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=4, max_length=12)
+
+
 class GarminSync(BaseModel):
     model_config = ConfigDict(extra="forbid")
     start: date | None = None

@@ -54,3 +54,5 @@ body.editor-open{overflow:hidden}
 @media(max-width:360px){.health-layout{padding-left:16px;padding-right:16px}}
 .detail-check{margin:8px 0 0;display:grid;gap:4px 16px;grid-template-columns:max-content minmax(0,1fr)}.detail-check dt{font-weight:600}.detail-check dd{margin:0;overflow-wrap:anywhere;color:var(--muted)}.detail-check code{font-size:12px}
 @media(max-width:420px){.detail-check{grid-template-columns:1fr}.detail-check dd{margin-bottom:8px}}
+.garmin-account{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}.garmin-account h3{margin:0 0 4px;font-size:16px;font-weight:600}
+.tsub a{color:var(--accent)}

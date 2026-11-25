@@ -25,7 +25,8 @@ from .garmin import GarminError, GarminLink
 from .mcp_server import build_mcp
 from .models import AuthRecord
 from .oauth import MCPAuthorization, OAuth
-from .schemas import CATEGORIES, Category, GarminHistory, GarminKey, GarminSync, MealInput, NoteInput
+from .schemas import (CATEGORIES, Category, GarminAccountCode, GarminAccountLogin, GarminHistory, GarminKey, GarminSync,
+                      MealInput, NoteInput)
 from .security import Security, local_next
 
 ROOT = Path(__file__).parent
@@ -241,6 +242,21 @@ def create_app(settings=None, garmin_http=None):
     @app.get("/api/garmin/history", dependencies=[Depends(security.require_user)])
     def garmin_history_status():
         return link.job_status()
+
+    # Optional Garmin account sign-in for steps and stress every 15 minutes (not in the Personal API).
+    @app.post("/api/garmin/account/login", dependencies=[Depends(security.check_write)])
+    def garmin_account_login(request: Request, body: GarminAccountLogin):
+        security.rate_limit(request, "garmin-account", limit=5)
+        return link.account_login(body.email, body.password)
+
+    @app.post("/api/garmin/account/mfa", dependencies=[Depends(security.check_write)])
+    def garmin_account_mfa(request: Request, body: GarminAccountCode):
+        security.rate_limit(request, "garmin-account-mfa", limit=6)
+        return link.account_mfa(body.code)
+
+    @app.post("/api/garmin/account/unlink", dependencies=[Depends(security.check_write)])
+    def garmin_account_unlink():
+        return link.account_unlink()
 
     @app.post("/api/garmin/disconnect", dependencies=[Depends(security.check_write)])
     def garmin_disconnect():
