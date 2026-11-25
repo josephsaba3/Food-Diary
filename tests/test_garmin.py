@@ -3,7 +3,7 @@ import json
 import time
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from alembic import command
@@ -11,7 +11,7 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.garmin import ApiError, summarize_activity, summarize_day
+from app.garmin import ApiError, build_timeline, summarize_activity, summarize_day
 from app.main import create_app
 from app.models import GarminAccount
 from tests.test_app import login, oauth_grant
@@ -32,6 +32,36 @@ RUN = {"activityId": 21000000001, "activityName": "Morning Run", "activityType":
 
 
 KEY = "gcpak-0123456789abcdef0123456789abcdef"
+SYDNEY = ZoneInfo("Australia/Sydney")
+
+
+def local_ms(day, hour, minute=0):
+    """Epoch milliseconds for a Sydney wall-clock time on an ISO date."""
+    moment = datetime.combine(date.fromisoformat(day), datetime.min.time()).replace(hour=hour, minute=minute, tzinfo=SYDNEY)
+    return int(moment.timestamp() * 1000)
+
+
+def day_window(day):
+    """Garmin's start/end fields: local midnight in UTC and as wall-clock time."""
+    start = datetime.fromtimestamp(local_ms(day, 0) / 1000, tz=timezone.utc)
+    return {"startTimestampGMT": start.strftime("%Y-%m-%dT%H:%M:%S.0"), "startTimestampLocal": f"{day}T00:00:00.0"}
+
+
+def heart_day(day):
+    # Every 2 minutes from 06:00 to 07:58, climbing from 60 to 119 bpm, with a gap the watch left empty.
+    values = [[local_ms(day, 6 + i // 30, (i % 30) * 2), 60 + i] for i in range(60)] + [[local_ms(day, 9), None]]
+    return {**day_window(day), "heartRateValueDescriptors": [{"key": "timestamp", "index": 0}, {"key": "heartrate", "index": 1}],
+            "heartRateValues": values, "restingHeartRate": 49}
+
+
+def battery_day(day):
+    values = [[local_ms(day, 6, m), "MEASURED", 70 - m // 3, 3] for m in range(0, 60, 3)]
+    return {"date": day, **day_window(day), "bodyBatteryValuesArray": values,
+            "bodyBatteryValueDescriptorDTOList": [
+                {"bodyBatteryValueDescriptorIndex": 0, "bodyBatteryValueDescriptorKey": "timestamp"},
+                {"bodyBatteryValueDescriptorIndex": 1, "bodyBatteryValueDescriptorKey": "bodyBatteryStatus"},
+                {"bodyBatteryValueDescriptorIndex": 2, "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"},
+                {"bodyBatteryValueDescriptorIndex": 3, "bodyBatteryValueDescriptorKey": "bodyBatteryVersion"}]}
 
 
 def jwt(exp, n):
@@ -69,6 +99,12 @@ class FakeGarmin:
             return HRV
         if path.startswith("/metrics-service/metrics/maxmet/daily/"):
             raise ApiError(404)
+        if path == "/wellness-service/wellness/dailyHeartRate":
+            return heart_day(params["date"])
+        if path == "/wellness-service/wellness/bodyBattery/reports/daily":
+            first, last = date.fromisoformat(params["startDate"]), date.fromisoformat(params["endDate"])
+            assert (last - first).days < 31
+            return [battery_day((first + timedelta(days=n)).isoformat()) for n in range((last - first).days + 1)]
         if path == "/activitylist-service/activities/search/activities":
             if self.activities is not None:
                 return self.activities[params["start"]:params["start"] + params["limit"]]
@@ -292,3 +328,66 @@ def test_health_view_model():
     assert titles[0] == "Tue 10 Nov" and "4–6 Nov" in titles and len(v["rows"]) == 8
     assert v["charts"]["rhr_path"].count("M") == 2  # the line breaks across the unworn days
     assert health_view.resolve_period(date(2026, 11, 20), start=date(2026, 1, 1), end=date(2026, 12, 1))[0] == date(2026, 11, 20) - timedelta(days=92)
+
+
+def test_timeline_folds_readings_into_15_minute_local_slots():
+    day = "2026-11-19"
+    slots = build_timeline(date.fromisoformat(day), heart_day(day), battery_day(day), SYDNEY)
+    assert [s["time"] for s in slots[:3]] == ["06:00", "06:15", "06:30"] and len(slots) == 8
+    # 06:00-06:15 holds the 2-minute readings at :00, :02 ... :14 (60-67 bpm) and the last Body Battery level in it.
+    assert slots[0] == {"time": "06:00", "hr": 64, "hr_min": 60, "hr_max": 67, "body_battery": 66}
+    assert slots[-1]["time"] == "07:45" and "body_battery" not in slots[-1]
+    # Rows without descriptors ([timestamp, level]), another day's readings and impossible values are ignored.
+    battery = {**day_window(day), "bodyBatteryValuesArray": [[local_ms(day, 23, 50), 40], [local_ms("2026-11-20", 0, 5), 39],
+                                                             [local_ms(day, 22), 140]]}
+    assert build_timeline(date.fromisoformat(day), None, battery, SYDNEY) == [{"time": "23:45", "body_battery": 40}]
+    # Travelling: the watch's own offset (UTC+9 here) decides the slot, not the diary's timezone.
+    tokyo = {"startTimestampGMT": "2026-11-18T15:00:00.0", "startTimestampLocal": "2026-11-19T00:00:00.0",
+             "heartRateValues": [[int(datetime(2026, 11, 19, 3, 0, tzinfo=timezone.utc).timestamp() * 1000), 70]]}
+    assert build_timeline(date.fromisoformat(day), tokyo, None, SYDNEY) == [{"time": "12:00", "hr": 70, "hr_min": 70, "hr_max": 70}]
+
+
+def test_timeline_is_synced_shown_and_served_to_claude(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    day = today() - timedelta(days=1)
+    client.put(f"/api/days/{day}/meals/breakfast", json={"time": "06:40", "food": "Oats", "symptom_status": "none",
+                                                          "symptoms": "", "expected_version": 0})
+    assert client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)}).json()["warnings"] == []
+    page = client.get(f"/health?period=7&day={day}").text
+    assert "Through the day" in page and "Peak 119 bpm at 07:45" in page and "66 → 51" in page
+    assert 'title="Breakfast 06:40"' in page and 'title="Morning Run, 06:15–06:46"' in page
+    assert "<td>06:15</td><td>71 bpm</td><td>68–74</td><td>61</td>" in page
+    # Picking another day swaps in that day's section only.
+    fragment = client.get(f"/health/timeline?day={day - timedelta(days=3)}").text
+    assert fragment.startswith("{#") is False and 'id="timeline"' in fragment and "No 15-minute readings" in fragment
+    assert "<html" not in fragment
+    # Claude reads the slots, optionally only a window such as the hour after breakfast.
+    token = client.post("/oauth/token", data=oauth_grant(client)).json()["access_token"]
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}
+    def call(**arguments):
+        response = client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                                              "params": {"name": "get_health_timeline", "arguments": arguments}})
+        return response.json()["result"]
+    result = call(day=str(day), start_time="06:40", end_time="07:40")
+    timeline = result.get("structuredContent") or json.loads(result["content"][0]["text"])
+    assert timeline["available"] and timeline["interval_minutes"] == 15
+    assert [s["time"] for s in timeline["slots"]] == ["06:45", "07:00", "07:15", "07:30"]
+    assert timeline["activities"] == [{"start": f"{day}T06:15", "name": "Morning Run", "type": "running", "duration_minutes": 31.0}]
+    assert call(day=str(day), start_time="6pm")["isError"]
+    missing = call(day=str(day - timedelta(days=3)))
+    assert not (missing.get("structuredContent") or json.loads(missing["content"][0]["text"]))["available"]
+    client.post("/logout", data={"csrf": client.headers["X-CSRF-Token"]})
+    assert client.get(f"/health/timeline?day={day}").status_code == 401
+
+
+def test_timeline_view_breaks_lines_at_gaps():
+    from app import health_view
+    slots = [{"time": "06:00", "hr": 60, "hr_min": 55, "hr_max": 70, "body_battery": 80},
+             {"time": "06:15", "hr": 62, "hr_min": 58, "hr_max": 66},
+             {"time": "09:00", "hr": 90, "hr_min": 90, "hr_max": 90, "body_battery": 70}]
+    v = health_view.timeline(date(2026, 11, 19), slots, [], {"lunch": {"time": "12:30"}, "snack": {"time": None}})
+    assert v["hr_line"].count("M") == 2 and v["hr_band"].count("Z") == 2 and v["bb_line"].count("M") == 2
+    assert v["summary"]["hr"] == "55–90" and v["summary"]["bb"] == "80 → 70"
+    assert v["summary"]["bb_range"] == "High 80 at 06:00 · low 70 at 09:00" and v["hr_lo"] == 50 and v["hr_hi"] == 100
+    assert [m["label"] for m in v["meals"]] == ["Lunch 12:30"]
+    assert not health_view.timeline(date(2026, 11, 19), [], [], {})["has_data"]
