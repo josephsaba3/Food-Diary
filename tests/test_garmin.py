@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from datetime import datetime, timezone
 
 import pytest
+from unittest.mock import ANY
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
@@ -463,10 +464,24 @@ def test_steps_every_15_minutes_when_garmin_serves_them(client, app, account):
     # Refused: both forms of the request are tried once, then never again.
     client.post("/api/garmin/sync", json={"days": 3})
     assert app.state.garmin.details["steps"] is False and len(chart_calls()) == 2
+    # The status and Settings say what Garmin answered, without the display name or any values.
+    probes = client.get("/api/garmin").json()["fifteen_minute_data"]
+    assert probes["steps"]["result"] == "not available" and probes["display_name"]["result"] == "found"
+    assert [a["request"] for a in probes["steps"]["attempts"]] == ["/wellness-service/wellness/dailySummaryChart/{displayName}?date=…",
+                                                                   "/wellness-service/wellness/dailySummaryChart?date=…"]
+    assert [a["answer"] for a in probes["steps"]["attempts"]] == ["HTTP 404", "HTTP 404"]
+    assert probes["stress"]["result"] == "not available" and probes["body_battery"]["result"] == "available"
+    assert "rows like [int, str, int, int]" in probes["body_battery"]["attempts"][0]["answer"]
+    settings = client.get("/settings").text
+    assert "15-minute data from Garmin" in settings and "watch-owner" not in settings and "{displayName}" in settings
     # Served (with the display name from the profile): steps land in the slots and the chart.
     app.state.garmin.details.pop("steps"); account.serves_steps = True; account.calls.clear()
     client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
     assert chart_calls() == ["/wellness-service/wellness/dailySummaryChart/watch-owner"]
+    assert client.get("/api/garmin").json()["fifteen_minute_data"]["steps"] == {
+        "result": "available", "checked_at": ANY,
+        "attempts": [{"request": "/wellness-service/wellness/dailySummaryChart/{displayName}?date=…",
+                      "answer": "a list of 8; first item has keys endGMT, primaryActivityLevel, startGMT, steps"}]}
     page = client.get(f"/health?start={day}&end={day}").text
     assert 'class="sbar steps"' in page and "Busiest 15 minutes 800 at 07:45" in page
     assert "<td>06:15</td><td>200</td><td>71 bpm</td>" in page
