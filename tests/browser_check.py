@@ -67,72 +67,84 @@ def run():
             page.get_by_label("Diary password").fill(settings.password)
             page.get_by_role("button", name="Open my diary").click()
             page.wait_for_url("**/?date=2026-09-24")
-            assert page.locator(".meal-row").count() == 6
-            assert page.locator("[data-import]").count() == 3
-            page.locator('[data-import="lunch"]').click()
-            page.wait_for_selector("dialog[open]")
-            assert page.get_by_label("What did you eat or drink?").input_value() == "Mushroom risotto"
-            assert page.locator("#meal-time").input_value() == ""
-            assert page.get_by_role("radio", name="Not recorded").is_checked()
-            assert page.locator("#meal-symptoms").input_value() == ""
+            assert page.locator(".tl-row").count() == 6 and page.locator(".empty-slot").count() == 6
+            # Copy from yesterday: food only, never yesterday's time or symptoms.
+            page.get_by_text("Copy from yesterday").click()
+            assert page.locator("[data-copy]").count() == 3
+            page.get_by_role("menuitem", name=re.compile("Dinner as today")).click()
+            page.wait_for_selector("#log-sheet[open]")
+            assert page.locator("#food-chips .chip").all_inner_texts()[0].startswith("Mushroom risotto")
+            assert page.locator('[data-slot="lunch"]').get_attribute("aria-pressed") == "true"
+            assert page.locator("#log-time").input_value() == "12:30"  # lunch's usual time on a past day
+            assert page.get_by_role("radio", name="Not now").get_attribute("aria-checked") == "true"
             page.evaluate("async () => { await Promise.all(document.getAnimations().map(a => a.finished)); }")
             page.evaluate("document.fonts.ready")
             page.screenshot(path=str(artifacts / "mobile-editor.png"))
-            page.get_by_label("Time Optional").click()
-            assert page.locator("#meal-time").input_value() == "12:30"  # Lunch opens the picker on PM.
-            page.get_by_label("Time Optional").fill("12:45")
-            page.get_by_role("radio", name="No symptoms", exact=True).check()
-            page.get_by_role("button", name="Save meal").click()
-            page.wait_for_selector("dialog[open]", state="hidden")
-            page.reload()
-            assert "Mushroom risotto" in page.locator("#meal-lunch").inner_text()
-            assert "12:45" in page.locator("#meal-lunch").inner_text()
-            assert "Bloating" not in page.locator("#meal-lunch").inner_text()
-            expect(page.get_by_role("button", name="Edit lunch", exact=True)).to_have_accessible_description(re.compile("Mushroom risotto.*12:45"))
-            # An actual failed save must leave the draft open and readable.
-            page.get_by_role("button", name="Add breakfast", exact=True).click()
-            page.get_by_label("Time Optional").click()
-            assert page.locator("#meal-time").input_value() == "08:00"  # Breakfast opens the picker on AM.
-            page.get_by_label("What did you eat or drink?").fill("Oats and coffee")
+            page.locator("#log-time").fill("12:45")
+            page.get_by_role("radio", name="No symptoms").click()
+            page.get_by_role("button", name="Save to lunch").click()
+            lunch = page.locator("#slot-lunch.has-meal")
+            lunch.wait_for()
+            assert "Mushroom risotto" in lunch.inner_text() and "12:45" in lunch.inner_text()
+            assert "No symptoms" in lunch.inner_text() and "Bloating" not in lunch.inner_text()
+            # Symptom shortcuts write free text, and a failed save leaves the draft open and readable.
+            page.locator('[data-add="breakfast"]').click()
+            page.wait_for_selector("#log-sheet[open]")
+            assert page.locator("#log-time").input_value() == "08:00"
+            page.locator("#food-input").fill("Oats and coffee")
+            page.get_by_role("radio", name="Had symptoms").click()
+            page.locator('[data-symptom="Bloating"]').click()
+            page.locator('[data-sev="2"]').click()
+            assert page.locator("#symptom-preview").inner_text() == "Bloating · severity 2/5 (mild)"
             page.route("**/api/days/*/meals/*", lambda route: route.abort())
-            page.get_by_role("button", name="Save meal").click()
-            page.locator("#meal-error").wait_for(state="visible")
-            assert page.get_by_label("What did you eat or drink?").input_value() == "Oats and coffee"
+            page.get_by_role("button", name="Save to breakfast").click()
+            page.locator("#log-error").wait_for(state="visible")
+            assert page.locator("#food-chips .chip").all_inner_texts()[0].startswith("Oats and coffee")
             page.unroute("**/api/days/*/meals/*")
             pending = []
             page.route("**/api/days/*/meals/*", lambda route: pending.append(route))
-            page.get_by_role("button", name="Save meal").click()
-            expect(page.locator("#meal-food")).to_be_disabled()
-            expect(page.locator("#meal-time")).to_be_disabled()
-            expect(page.get_by_role("radio", name="Not recorded")).to_be_disabled()
+            page.get_by_role("button", name="Save to breakfast").click()
+            expect(page.locator("#food-input")).to_be_disabled()
+            expect(page.locator("#log-time")).to_be_disabled()
             assert pending
             pending.pop().continue_()
-            page.wait_for_selector("dialog[open]", state="hidden")
+            page.wait_for_load_state("load")
+            page.locator("#slot-breakfast .symptom-note").wait_for()
+            assert "Bloating · severity 2/5 (mild)" in page.locator("#slot-breakfast").inner_text()
             page.unroute("**/api/days/*/meals/*")
             # Stale notes must not overwrite notes added by Claude after the render.
             token = page.locator('meta[name="csrf-token"]').get_attribute("content")
             page.request.put(origin + "/api/days/2026-09-24/notes", data={"text": "Newer note from another device", "expected_version": 0}, headers={"X-CSRF-Token": token})
-            page.get_by_role("textbox", name="Notes for the day", exact=True).fill("A stale browser note")
+            page.locator("#open-notes").click()
+            page.locator("#day-notes").fill("A stale browser note")
             page.get_by_role("button", name="Save notes", exact=True).click()
             page.locator("#notes-error").wait_for(state="visible")
             assert "elsewhere" in page.locator("#notes-error").inner_text()
             page.on("dialog", lambda dialog: dialog.accept())
             page.reload()
-            page.get_by_role("textbox", name="Notes for the day", exact=True).fill("Felt comfortable after lunch.")
+            page.locator("#open-notes").click()
+            page.locator("#day-notes").fill("Felt comfortable after lunch.")
             page.get_by_role("button", name="Save notes", exact=True).click()
-            expect(page.locator("#notes-status")).to_have_text("Saved")
-            # Capture both required layouts, with fonts settled and no animation overlay.
+            page.wait_for_selector("#notes-sheet[open]", state="hidden")
+            assert page.locator("#open-notes").inner_text() == "Felt comfortable after lunch."
+            # Capture both layouts, with fonts settled, and check every page for overflow.
             page.evaluate("document.fonts.ready")
             page.locator("#toast").evaluate("el => el.hidden = true")
             page.evaluate("document.activeElement.blur(); window.scrollTo(0, 0)")
             page.screenshot(path=str(artifacts / "mobile.png"), full_page=True)
-            for width in (320, 390, 760, 1024, 1440):
-                page.set_viewport_size({"width": width, "height": 900})
-                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), f"overflow at {width}"
+            for path in ("/?date=2026-09-24", "/week?end=2026-09-24", "/report?start=2026-09-20&end=2026-09-24&notes=1", "/health"):
+                page.goto(origin + path)
+                for width in (320, 390, 760, 1024, 1440):
+                    page.set_viewport_size({"width": width, "height": 900})
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), f"overflow at {width} on {path}"
+            page.goto(origin + "/report?start=2026-09-20&end=2026-09-24")
+            assert "Mushroom risotto" in page.locator(".report-doc").inner_text()
+            page.goto(origin + "/?date=2026-09-24")
+            page.set_viewport_size({"width": 1440, "height": 900})
             page.evaluate("window.scrollTo(0, 0)")
             page.screenshot(path=str(artifacts / "desktop.png"), full_page=True)
             page.set_viewport_size({"width": 390, "height": 844})
-            page.get_by_role("link", name="Diary settings").click()
+            page.get_by_role("link", name="Settings").first.click()
             assert page.get_by_label("Server URL").input_value() == origin + "/mcp"
             for width in (320, 390):
                 page.set_viewport_size({"width": width, "height": 844})
@@ -144,7 +156,7 @@ def run():
             browser.close()
         server.should_exit = True
         thread.join(timeout=5)
-        print("Browser checks passed: import review, food-only copy, save/reload, failed-save recovery, note conflicts, settings and logout. No overflow at 320/390/760/1024/1440px; no JS errors.")
+        print("Browser checks passed: copy from yesterday (food only), log sheet save/reload, symptom shortcuts, failed-save recovery, note conflicts, settings and logout. No overflow on Today, Week, Report or Health at 320/390/760/1024/1440px; no JS errors.")
 
 
 if __name__ == "__main__":

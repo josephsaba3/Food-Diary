@@ -320,7 +320,7 @@ def timeline(day, slots, activities=(), meals=None, events=(), summary=None):
         step = 20 if hi - lo > 60 else 10
         peak = max(heart, key=lambda h: h[3])
         average = round(sum(h[1] for h in heart) / len(heart))
-        hr_chart.update(band=" ".join(band), line=" ".join(line),
+        hr_chart.update(band=" ".join(band), line=" ".join(line), lo=lo, hi=hi,
                         lines=[{"bottom": pct(v, lo, hi), "label": str(v)} for v in range(lo + step, hi, step)],
                         resting={"bottom": pct(resting, lo, hi), "label": f"resting {resting}"} if resting else None,
                         value=f"{min(h[2] for h in heart)}–{max(h[3] for h in heart)}",
@@ -401,3 +401,148 @@ def timeline(day, slots, activities=(), meals=None, events=(), summary=None):
         "axis": [{"left": h / 24 * 100, "text": f"{h:02d}:00", "align": "start" if h == 0 else "end" if h == 24 else "center"}
                  for h in (0, 6, 12, 18, 24)],
     }
+
+
+# ---- "Your day with meals": one day, waking hours, every metric on one time axis --------
+
+def _stress_word(stress):
+    """How the day's stress mostly felt, from Garmin's minutes at each level."""
+    minutes = {k: stress.get(f"{k}_minutes") or 0 for k in ("rest", "low", "medium", "high")}
+    total = sum(minutes.values())
+    if not total:
+        return None
+    top = max(minutes, key=minutes.get)
+    return "Mostly at rest" if top == "rest" else f"Mostly {top}"
+
+
+def day_tiles(summary):
+    s = summary or {}
+    st, hr, stress, bb = (s.get(k) or {} for k in ("steps", "heart_rate", "stress", "body_battery"))
+    tiles = []
+    if st.get("total") is not None:
+        goal = st.get("goal")
+        share = min(100, round(st["total"] / goal * 100)) if goal else None
+        tiles.append({"label": "Steps", "value": f"{st['total']:,}", "unit": None, "meter": share,
+                      "sub": (f"Goal of {goal:,} passed" if st["total"] >= goal else f"{share}% of {goal:,} goal") if goal else None,
+                      "good": bool(goal and st["total"] >= goal)})
+    if hr.get("resting") is not None:
+        tiles.append({"label": "Resting heart rate", "value": hr["resting"], "unit": "bpm",
+                      "sub": f"Day range {hr['min']}–{hr['max']}" if hr.get("min") is not None and hr.get("max") is not None else None})
+    if stress.get("average") is not None:
+        tiles.append({"label": "Stress", "value": stress["average"], "unit": "avg", "sub": _stress_word(stress)})
+    if bb.get("highest") is not None:
+        tiles.append({"label": "Body Battery", "value": bb["highest"], "unit": "high",
+                      "sub": f"Low of {bb['lowest']}" if bb.get("lowest") is not None else None})
+    return tiles
+
+
+def watch_details(summary, activities=()):
+    """The rest of the day's Garmin summary as short rows: sleep, HRV, workouts, calories, breathing, SpO2."""
+    s = summary or {}
+    sleep, hrv, cal = s.get("sleep") or {}, s.get("hrv") or {}, s.get("calories") or {}
+    hm = lambda m: f"{int(m) // 60}h {int(m) % 60:02d}m"
+    label = lambda v: str(v or "").replace("_", " ").capitalize()
+    rows = []
+    if sleep.get("total_minutes") is not None:
+        extra = [f"score {sleep['score']}" if sleep.get("score") is not None else None, label(sleep.get("quality")).lower() or None,
+                 f"{sleep['start'][11:]}–{sleep['end'][11:]}" if sleep.get("start") and sleep.get("end") else None]
+        rows.append({"label": "Sleep", "value": hm(sleep["total_minutes"]), "sub": " · ".join(x for x in extra if x)})
+    if hrv.get("last_night_avg") is not None:
+        rows.append({"label": "Overnight HRV", "value": f"{hrv['last_night_avg']} ms", "sub": label(hrv.get("status"))})
+    for a in activities or ():
+        name = a.get("name") or label(a.get("type")) or "Workout"
+        bits = [a.get("start", "")[11:16] or None, f"{round(a['duration_minutes'])} min" if a.get("duration_minutes") else None,
+                f"{a['distance_km']} km" if a.get("distance_km") else None, f"{a['avg_hr']} bpm avg" if a.get("avg_hr") else None]
+        rows.append({"label": "Workout", "value": name, "sub": " · ".join(x for x in bits if x)})
+    if cal.get("active") is not None:
+        rows.append({"label": "Active calories", "value": f"{round(cal['active']):,}", "sub": f"{round(cal['total']):,} total" if cal.get("total") else ""})
+    if (s.get("respiration") or {}).get("waking_avg") is not None:
+        rows.append({"label": "Breathing", "value": f"{round(s['respiration']['waking_avg'])} /min", "sub": "Awake average"})
+    if (s.get("spo2") or {}).get("average") is not None:
+        rows.append({"label": "SpO2", "value": f"{s['spo2']['average']}%", "sub": f"Lowest {s['spo2']['lowest']}%" if s["spo2"].get("lowest") else ""})
+    return rows
+
+
+def waking_window(slots, summary, now_minute=None):
+    """Minutes of the day to chart: from waking (or the first movement) to the last reading, on whole hours."""
+    rows = [(_minutes(s["time"]), s) for s in slots if _minutes(s.get("time")) is not None]
+    wake = _minutes(((summary or {}).get("sleep") or {}).get("end", "")[11:16]) if (summary or {}).get("sleep") else None
+    if wake is None:
+        moving = [m for m, s in rows if m >= 240 and (s.get("steps") or 0) > 20]
+        wake = moving[0] if moving else next((m for m, s in rows if m >= 300 and s.get("hr") is not None), 360)
+    last = max((m for m, s in rows if s.get("hr") is not None or s.get("steps")), default=1320) + 15
+    if now_minute is not None:
+        last = min(last, now_minute + 15)
+    start = max(0, (wake // 60) * 60)
+    end = min(DAY_MINUTES, -(-last // 60) * 60)
+    if end - start < 360:
+        end = min(DAY_MINUTES, start + 360)
+        start = max(0, end - 360)
+    return start, end
+
+
+def day_chart(day, slots, activities=(), meals=None, events=(), summary=None, now_minute=None, labels=None):
+    """The single-day Health view: tiles, the combined chart over waking hours, and a summary after each meal."""
+    t = timeline(day, slots, activities, meals, events, summary)
+    start, end = waking_window(slots, summary, now_minute)
+    span = end - start
+
+    def at(minute):
+        return (minute - start) / span * 100
+
+    def inside(left_pct, width_pct=0.0):
+        a, b = left_pct / 100 * DAY_MINUTES, (left_pct + width_pct) / 100 * DAY_MINUTES
+        return b >= start and a <= end
+
+    def remap(item):
+        a = item["left"] / 100 * DAY_MINUTES
+        b = a + item.get("width", 0) / 100 * DAY_MINUTES
+        a, b = max(a, start), min(b, end)
+        return {**item, "left": at(a), "width": max(0.6, (b - a) / span * 100)}
+
+    for bar in t["stress"]["bars"]:
+        bar["band"] = "rest" if bar["value"] <= 25 else "up"
+    periods = [remap(p) for p in t["stress"]["periods"] if inside(p["left"], p["width"])]
+    spans = [remap(s) for s in t["spans"] if inside(s["left"], s["width"])]
+
+    rows = {_minutes(s["time"]): s for s in slots if _minutes(s.get("time")) is not None}
+    resting = ((summary or {}).get("heart_rate") or {}).get("resting")
+    windows = []
+    for key, meal in (meals or {}).items():
+        m = _minutes(meal.get("time") or "")
+        if m is None:
+            continue
+        window = [s for minute, s in rows.items() if m <= minute < m + 120]
+        hrs = [s["hr_max"] for s in window if s.get("hr_max") is not None]
+        stresses = [s.get("stress_max", s["stress"]) for s in window if s.get("stress") is not None]
+        steps = sum(s.get("steps") or 0 for s in window)
+        status = meal.get("symptom_status")
+        label = (labels or {}).get(key, key.replace("_", " ").capitalize())
+        note = []
+        if steps >= 800:
+            note.append("Steps were also high in this window, so movement is part of the picture.")
+        note.append("Watch readings for the two hours after the meal, shown as measured.")
+        windows.append({
+            "key": key, "label": label, "time": _clock(m), "minute": m, "left": at(min(max(m, start), end)),
+            "inside": start <= m <= end, "peak_hr": max(hrs) if hrs else None, "peak_stress": max(stresses) if stresses else None,
+            "steps": steps if window else None, "status": status,
+            "symptoms": "Not recorded" if status == "unrecorded" else "None" if status == "none" else "Reported",
+            "note": " ".join(note), "rest": resting})
+    windows.sort(key=lambda w: w["minute"])
+    for w in windows:
+        w["edge"] = "edge-start" if w["left"] < 8 else "edge-end" if w["left"] > 92 else ""
+    current = [w for w in windows if now_minute is None or w["minute"] <= now_minute]
+    selected = (current or windows or [None])[-1]
+
+    ticks = [h for h in range(start // 60, end // 60 + 1) if (h * 60 - start) % 180 == 0 or h * 60 == end]
+    axis = [{"left": at(h * 60), "text": f"{h:02d}:00",
+             "align": "start" if h * 60 == start else "end" if h * 60 == end else "center"} for h in ticks]
+    peak = None
+    if t["hr"]["line"]:
+        heart = [(m, s["hr_max"]) for m, s in rows.items() if s.get("hr_max") is not None and start <= m < end]
+        if heart:
+            pm, pv = max(heart, key=lambda h: h[1])
+            peak = {"left": at(pm + 7.5), "bottom": pct(pv, t["hr"]["lo"], t["hr"]["hi"]), "value": pv, "time": _clock(pm)}
+    return {**t, "start": start, "end": end, "span": span, "periods": periods, "spans": spans, "axis": axis,
+            "windows": windows, "selected": selected["key"] if selected else None, "peak": peak,
+            "tiles": day_tiles(summary), "details": watch_details(summary, activities), "window_label": f"{_clock(start)}–{_clock(end % DAY_MINUTES) if end < DAY_MINUTES else '24:00'}"}

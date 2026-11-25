@@ -1,91 +1,62 @@
 {% extends "base.html" %}
 {% block title %}Health · Food diary{% endblock %}
-{% block header_actions %}<a class="icon-button" href="/settings" aria-label="Diary settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></a>{% endblock %}
 {% block content %}
 {% set v = view %}
-{% set sync_icon %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-3M4 13a8 8 0 0 0 14.9 3M5 3v5h5m9 13v-5h-5"/></svg>{% endset %}
-{% set pulse_icon %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>{% endset %}
-{% set chevron %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>{% endset %}
 {% if not garmin.connected and not garmin.synced_days.count %}
-<main id="main" class="health-unlinked">
-  <h1>Health</h1>
-  <div class="unlinked-body">
-    <span class="round-icon">{{ pulse_icon }}</span>
-    <h2>Link your Garmin to see trends</h2>
-    <p class="muted">Steps, heart rate, stress and Body Battery will appear here day by day, next to your meals.</p>
-    <a class="button primary" href="/settings#garmin">Open Settings</a>
-  </div>
+<main id="main" class="page health health-unlinked">
+  <header class="page-head"><div><h1>Health</h1></div></header>
+  <span class="round" aria-hidden="true">{{ icon('pulse', 26) }}</span>
+  <h2>Link your Garmin to see your days</h2>
+  <p>Steps, heart rate, stress and Body Battery appear here next to your meals.</p>
+  <a class="btn primary" href="/settings#garmin">Open Settings</a>
 </main>
 {% else %}
-<main id="main" class="health-layout" data-start="{{ v.start }}" data-end="{{ v.end }}" data-selected="{{ v.selected }}">
-  <aside class="health-aside">
-    <div class="health-title">
-      <h1>Health<span>{{ v.label }}</span></h1>
-      {% if garmin.connected %}<button class="button secondary compact phone-only" type="button" data-health-sync {% if limited %}disabled{% endif %}>{{ sync_icon }}Sync</button>{% endif %}
-    </div>
-    <form class="period-form" method="get" action="/health" id="period-form">
-      <fieldset class="period-fieldset">
-        <legend>Period</legend>
-        <div class="symptom-options period-options">
-          {% for value, text in (("1", "Today"), ("7", "7 days"), ("30", "30 days"), ("90", "90 days"), ("custom", "Custom")) %}
-          <label class="{{ 'custom-option' if value == 'custom' else '' }}"><input type="radio" name="period" value="{{ value }}" {% if period == value %}checked{% endif %}><span>{{ text }}</span></label>
-          {% endfor %}
-        </div>
-      </fieldset>
-      <div class="range-fields" {% if period != 'custom' %}data-collapsible{% endif %}>
-        <label>From<input type="date" name="start" value="{{ v.start }}" max="{{ today }}"></label>
-        <label>To<input type="date" name="end" value="{{ v.end }}" max="{{ today }}"></label>
-      </div>
-      <p class="small muted range-help">Pick any range up to 93 days.</p>
-      <noscript><button class="button secondary" type="submit">Show</button></noscript>
-    </form>
-    {% if garmin.connected %}<button class="button secondary compact desktop-only aside-sync" type="button" data-health-sync {% if limited %}disabled{% endif %}>{{ sync_icon }}Sync from Garmin</button>{% endif %}
-    <p class="error health-alert" id="health-alert" role="alert" {% if not limited %}hidden{% endif %}>{% if limited %}Garmin is limiting requests right now. Your saved days still show below. Try syncing again in a few minutes.{% endif %}</p>
-    <p class="small muted" id="health-sync-status" role="status"></p>
-    <section class="coverage" aria-label="Watch coverage">
-      <div class="coverage-head"><p>Watch worn</p><p class="small muted">{{ v.worn_count }} of {{ v.n }} {{ 'day' if v.n == 1 else 'days' }}</p></div>
-      <div class="coverage-strip" aria-hidden="true">{% for x in v.days %}<i class="{{ 'on' if x.worn else '' }}"></i>{% endfor %}</div>
-      <div class="key-row small muted"><span class="key"><i class="key-on"></i>Readings</span><span class="key"><i class="key-off"></i>No readings</span></div>
-    </section>
-    <div class="sidebar-note desktop-only">{{ pulse_icon }}<p>Averages use only the days your watch was worn. Pick any day to see it in full.</p></div>
-  </aside>
+<main id="main" class="page wide health health-layout-root" data-start="{{ v.start }}" data-end="{{ v.end }}" data-selected="{{ v.selected }}">
+  <header class="page-head">
+    <div><p class="eyebrow">{{ tl.long if tl else v.label }}</p><h1>Health</h1></div>
+    {% if garmin.connected %}<button class="sync-btn" type="button" data-health-sync {% if limited %}disabled{% endif %}><span class="sync-dot{{ ' off' if not garmin.last_sync_at else '' }}"></span>{% if garmin.last_sync_at %}Synced {{ garmin.last_sync_at|clock }}{% else %}Sync{% endif %}{{ icon('sync', 18) }}</button>{% endif %}
+  </header>
+  <nav class="segmented health-range" aria-label="Period">
+    {% for value, text in (("1", "Day"), ("7", "Week"), ("30", "Month"), ("90", "90 days")) %}<a href="/health?period={{ value }}" {% if period == value %}aria-current="page"{% endif %}>{{ text }}</a>{% endfor %}
+  </nav>
+  {% if period == 'custom' %}<p class="range-label">{{ v.label }} · <a class="link-btn" href="/health">Back to today</a></p>{% endif %}
+  <p class="error health-alert" id="health-alert" role="alert" {% if not limited %}hidden{% endif %}>{% if limited %}Garmin is limiting requests right now. Your saved days still show below. Try syncing again in a few minutes.{% endif %}</p>
+  <p class="hint sync-status" id="health-sync-status" role="status"></p>
 
-  <div class="health-content">
   {% if not v.worn_count %}
-    <p class="muted health-nothing">No watch readings for these days. {% if garmin.connected %}If you wore your watch, sync to bring them in, or pick a longer period.{% else %}Link Garmin again in <a href="/settings#garmin">Settings</a> to bring in more days, or pick a longer period.{% endif %}</p>
+  <p class="health-nothing">No watch readings for {{ 'this day' if v.n == 1 else 'these days' }}. {% if garmin.connected %}If you wore your watch, sync to bring them in.{% else %}Link Garmin again in <a href="/settings#garmin">Settings</a> to bring in more days.{% endif %}</p>
+  {% elif v.n == 1 %}
+    {% include "_day_chart.html" %}
   {% else %}
-    {% set a = v.averages %}
-    <section aria-labelledby="avg-heading">
-      <div class="section-heading health-heading"><h2 id="avg-heading">{{ a.heading }}</h2>{% if v.n > 1 %}<span class="small muted"><span class="desktop-only">{{ v.worn_count }} {{ 'day' if v.worn_count == 1 else 'days' }} with readings</span><span class="phone-only">Days worn only</span></span>{% endif %}</div>
-      <dl class="health-grid averages-grid">
-        {% if a.steps %}<div class="health-tile"><dt>{{ a.steps_label }}</dt><dd>{{ a.steps }}</dd>{% if a.steps_sub %}<span>{{ a.steps_sub }}</span>{% endif %}</div>{% endif %}
-        <div class="health-tile"><dt>Resting heart rate</dt><dd>{{ a.rhr }}<small> bpm</small></dd>{% if a.rhr_sub %}<span>{{ a.rhr_sub }}</span>{% endif %}</div>
-        {% if a.stress %}<div class="health-tile"><dt>Stress</dt><dd>{{ a.stress }}<small> avg</small></dd>{% if a.stress_sub %}<span>{{ a.stress_sub }}</span>{% endif %}</div>{% endif %}
-        {% if a.bb %}<div class="health-tile"><dt>Body Battery</dt><dd>{{ a.bb }}<small> high</small></dd>{% if a.bb_sub %}<span>{{ a.bb_sub }}</span>{% endif %}</div>{% endif %}
-      </dl>
-    </section>
+  {% set a = v.averages %}
+  <section class="tiles two health-tiles" aria-label="{{ a.heading }}">
+    {% if a.steps %}<div class="tile outline"><span class="tile-label">{{ a.steps_label }}</span><span class="tile-value">{{ a.steps }}</span>{% if a.steps_sub %}<span class="tile-sub">{{ a.steps_sub }}</span>{% endif %}</div>{% endif %}
+    <div class="tile outline"><span class="tile-label">Resting heart rate</span><span class="tile-value">{{ a.rhr }} <small>bpm</small></span>{% if a.rhr_sub %}<span class="tile-sub">{{ a.rhr_sub }}</span>{% endif %}</div>
+    {% if a.stress %}<div class="tile outline"><span class="tile-label">Stress</span><span class="tile-value">{{ a.stress }} <small>avg</small></span>{% if a.stress_sub %}<span class="tile-sub">{{ a.stress_sub }}</span>{% endif %}</div>{% endif %}
+    {% if a.bb %}<div class="tile outline"><span class="tile-label">Body Battery</span><span class="tile-value">{{ a.bb }} <small>high</small></span>{% if a.bb_sub %}<span class="tile-sub">{{ a.bb_sub }}</span>{% endif %}</div>{% endif %}
+  </section>
+  <section class="coverage" aria-label="Watch coverage">
+    <div class="coverage-head"><p>Watch worn</p><p class="muted">{{ v.worn_count }} of {{ v.n }} days · averages use worn days only</p></div>
+    <div class="coverage-strip" aria-hidden="true">{% for x in v.days %}<i class="{{ 'on' if x.worn else '' }}"></i>{% endfor %}</div>
+  </section>
 
-    {% set sel = v.days[v.selected] %}
-    {% if v.n == 1 %}
-    {% set status %}{% if sel.worn %}Watch worn{% if sel.workout %} · {{ sel.workout }}{% endif %}{% else %}No watch readings this day{% endif %}{% endset %}
-    {% include "_timeline.html" %}
-    {% else %}
-    {% set c = v.charts %}
-    <section class="trend-section" aria-labelledby="trend-heading">
-      <div class="section-heading health-heading"><h2 id="trend-heading">Day by day</h2><span class="small muted"><span class="desktop-only">Point at or select a day</span><span class="phone-only">Tap a day</span></span></div>
+  {% set sel = v.days[v.selected] %}
+  {% set c = v.charts %}
+  <section class="health-section health-layout" aria-labelledby="trend-heading">
+    <div>
+      <div class="section-title"><h2 id="trend-heading">Day by day</h2><span class="hint">Tap a day</span></div>
       <div class="selbar">
-        <div><p class="selbar-title" id="sel-title">{{ sel.long }}</p><p class="small muted" id="sel-status">{% if sel.worn %}Watch worn{% if sel.workout %} · {{ sel.workout }}{% endif %}{% else %}No watch readings this day{% endif %}</p></div>
-        <a class="button secondary compact" id="sel-view" href="/?date={{ sel.iso }}">View day{{ chevron }}</a>
+        <div><p class="selbar-title" id="sel-title">{{ sel.long }}</p><p class="hint" id="sel-status">{% if sel.worn %}Watch worn{% if sel.workout %} · {{ sel.workout }}{% endif %}{% else %}No watch readings this day{% endif %}</p></div>
+        <a class="btn compact" id="sel-view" href="/?date={{ sel.iso }}">View day</a>
       </div>
       <div class="charts{{ ' dense' if c.dense else '' }}">
         {% macro value(metric, x) -%}
-          {%- if not x.worn -%}<span class="muted no-reading">No readings</span>
+          {%- if not x.worn -%}<span class="no-reading">No readings</span>
           {%- elif metric == 'steps' -%}{{ '{:,}'.format(x.steps) if x.steps is not none else '–' }}<small> steps</small>
           {%- elif metric == 'rhr' -%}{{ x.rhr }}<small> bpm</small>
           {%- elif metric == 'stress' -%}{{ x.stress if x.stress is not none else '–' }}<small> avg</small>
           {%- else -%}{% if x.bb_high is not none %}{{ x.bb_low }}–{{ x.bb_high }}{% else %}–{% endif %}<small> low–high</small>{%- endif -%}
         {%- endmacro %}
-        {% macro axis(c) %}<div class="xl" aria-hidden="true">{% for l in c.axis %}<span class="align-{{ l.align }}" data-pos="left:{{ '%.2f'|format(l.left) }}%">{{ l.text }}</span>{% endfor %}</div>{% endmacro %}
         {% for metric, title in (("steps", "Steps"), ("rhr", "Resting heart rate"), ("stress", "Stress"), ("bb", "Body Battery")) %}
         <div class="hchart" data-metric="{{ metric }}">
           <div class="chead"><h3>{{ title }}</h3><p class="cval" data-value="{{ metric }}">{{ value(metric, sel) }}</p></div>
@@ -107,54 +78,42 @@
               </button>{% endfor %}
             </div>
           </div>
-          {{ axis(c) }}
-          {% if metric == 'steps' %}<p class="small muted chart-key phone-only"><span class="key"><i class="key-avg"></i>Period average</span><span class="key"><i class="key-workout"></i>Workout</span></p>{% endif %}
-          {% if metric == 'bb' %}<p class="small muted phone-only chart-note">Each bar runs from the day’s lowest to its highest.</p>{% endif %}
+          <div class="xl" aria-hidden="true">{% for l in c.axis %}<span class="align-{{ l.align }}" data-pos="left:{{ '%.2f'|format(l.left) }}%">{{ l.text }}</span>{% endfor %}</div>
+          {% if metric == 'bb' %}<p class="hint">Each bar runs from the day’s lowest to its highest.</p>{% endif %}
         </div>
         {% endfor %}
       </div>
-      <p class="small muted chart-key desktop-only"><span class="key"><i class="key-avg"></i>Period average</span><span class="key"><i class="key-workout"></i>Workout</span><span class="key"><i class="key-gap"></i>No readings</span></p>
-    </section>
+      <p class="chart-key"><span class="key"><i class="key-avg"></i>Period average</span><span class="key"><i class="key-workout"></i>Workout</span></p>
+    </div>
 
     <section class="log-section" aria-labelledby="log-heading">
-      <div class="section-heading health-heading"><h2 id="log-heading">Daily log</h2><span class="small muted">Newest first</span></div>
-      <div class="table-wrap desktop-only">
-        <table class="log-table">
-          <thead><tr><th scope="col">Day</th><th scope="col">Steps</th><th scope="col">Resting HR</th><th scope="col">Stress</th><th scope="col">Body Battery</th><th scope="col">Workout</th></tr></thead>
-          <tbody>
-          {% for r in v.rows %}
-            {% if r.gap %}<tr class="gap-row{{ ' log-more' if loop.index > v.log_preview else '' }}"><td>{{ r.title }}</td><td colspan="5">{{ r.sub }}</td></tr>
-            {% else %}<tr class="{{ 'log-more' if loop.index > v.log_preview else '' }}"><td><a href="/?date={{ r.iso }}" data-open-day="{{ r.i }}">{{ r.title }}</a></td><td>{{ r.steps }}</td><td>{{ r.rhr }}</td><td>{{ r.stress }}</td><td>{{ r.bb }}</td><td>{{ r.workout or '–' }}</td></tr>{% endif %}
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <ul class="log-list phone-only">
+      <div class="section-title"><h2 id="log-heading">Daily log</h2><span class="hint">Newest first</span></div>
+      <ul class="log-list">
         {% for r in v.rows %}
           {% if r.gap %}<li class="log-row gap-row{{ ' log-more' if loop.index > v.log_preview else '' }}"><span class="mk off" aria-hidden="true">–</span><span class="rmain"><span class="rt">{{ r.title }}</span><span class="rs">{{ r.sub }}</span></span></li>
-          {% else %}<li class="{{ 'log-more' if loop.index > v.log_preview else '' }}"><a class="log-row" href="/?date={{ r.iso }}" data-open-day="{{ r.i }}"><span class="mk" aria-hidden="true">{{ r.day }}</span><span class="rmain"><span class="rt">{{ r.title }}</span><span class="rs">{{ r.sub }}</span>{% if r.workout %}<span class="rw"><i></i>{{ r.workout }}</span>{% endif %}</span><span class="chev">{{ chevron }}</span></a></li>{% endif %}
+          {% else %}<li class="{{ 'log-more' if loop.index > v.log_preview else '' }}"><a class="log-row" href="/health?start={{ r.iso }}&amp;end={{ r.iso }}" data-open-day="{{ r.i }}"><span class="mk" aria-hidden="true">{{ r.day }}</span><span class="rmain"><span class="rt">{{ r.title }}</span><span class="rs">{{ r.sub }}</span>{% if r.workout %}<span class="rw"><i></i>{{ r.workout }}</span>{% endif %}</span><span class="chev">{{ icon('right', 18) }}</span></a></li>{% endif %}
         {% endfor %}
       </ul>
-      {% if v.rows|length > v.log_preview %}<button class="button secondary show-all" type="button" id="show-all-days">Show all {{ v.n }} days</button>{% endif %}
+      {% if v.rows|length > v.log_preview %}<button class="btn show-all" type="button" id="show-all-days">Show all {{ v.n }} days</button>{% endif %}
     </section>
-    {% endif %}
-  {% endif %}
-    <p class="small muted health-footer">From your Garmin{% if garmin.last_sync_at %} · last synced {{ garmin.last_sync_at|localtime }}{% endif %}</p>
-  </div>
-</main>
+  </section>
 
-<dialog id="day-sheet" aria-labelledby="sheet-title">
-  <div class="sheet">
-    <div class="dialog-heading"><div><h2 id="sheet-title"></h2><p id="sheet-status" class="muted small"></p></div><button class="icon-button" type="button" data-close-sheet aria-label="Close day"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
-    <div class="dialog-body">
-      <p class="muted sheet-empty" id="sheet-empty" hidden>No watch readings this day.</p>
-      <dl class="health-grid sheet-grid" id="sheet-tiles"></dl>
-      <a class="sheet-meals" id="sheet-meals" href="/"><span class="round-icon small-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M9 8h6M9 11h4"/></svg></span><span class="rmain"><span class="rt">Meals and symptoms</span><span class="rs" id="sheet-meals-sub"></span></span><span class="chev">{{ chevron }}</span></a>
-      {% if v.n > 1 %}<a class="sheet-meals" id="sheet-detail" href="/health"><span class="round-icon small-icon">{{ pulse_icon }}</span><span class="rmain"><span class="rt">Through the day</span><span class="rs">Steps, heart rate, stress and Body Battery every 15 minutes</span></span><span class="chev">{{ chevron }}</span></a>{% endif %}
+  <dialog class="sheet" id="day-sheet" aria-labelledby="sheet-title">
+    <div class="sheet-inner">
+      <span class="sheet-grip" aria-hidden="true"></span>
+      <div class="sheet-head"><div><h2 id="sheet-title"></h2><p id="sheet-status" class="sheet-sub"></p></div><button class="icon-btn" type="button" data-close-sheet aria-label="Close day">{{ icon('close') }}</button></div>
+      <div class="sheet-body">
+        <p class="muted" id="sheet-empty" hidden>No watch readings this day.</p>
+        <div class="sheet-tiles" id="sheet-tiles"></div>
+        <a class="sheet-link" id="sheet-detail" href="/health"><span class="round">{{ icon('pulse', 20) }}</span><span class="rmain"><span class="rt">Through the day</span><span class="rs">Every 15 minutes, with your meals</span></span><span class="chev">{{ icon('right', 18) }}</span></a>
+        <a class="sheet-link" id="sheet-meals" href="/"><span class="round">{{ icon('today', 20) }}</span><span class="rmain"><span class="rt">Meals and symptoms</span><span class="rs" id="sheet-meals-sub"></span></span><span class="chev">{{ icon('right', 18) }}</span></a>
+      </div>
+      <div class="sheet-foot"><div class="sheet-nav"><button class="btn" type="button" id="sheet-prev">{{ icon('left', 20) }}</button><button class="btn" type="button" id="sheet-next">{{ icon('right', 20) }}</button></div><a class="btn primary grow" id="sheet-open" href="/">Open in diary</a></div>
     </div>
-    <div class="dialog-actions"><button class="button secondary square" type="button" id="sheet-prev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button><button class="button secondary square" type="button" id="sheet-next"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg></button><a class="button primary sheet-open" id="sheet-open" href="/">Open in diary</a></div>
-  </div>
-</dialog>
-<script type="application/json" id="health-data">{{ v.client|tojson }}</script>
+  </dialog>
+  <script type="application/json" id="health-data">{{ v.client|tojson }}</script>
+  {% endif %}
+  <p class="health-footer">From your Garmin{% if garmin.last_sync_at %} · last synced {{ garmin.last_sync_at|localtime }}{% endif %}</p>
+</main>
 {% endif %}
 {% endblock %}

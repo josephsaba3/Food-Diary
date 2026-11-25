@@ -14,7 +14,8 @@ class Category(StrEnum):
     evening_snack = "evening_snack"
 
 
-CATEGORIES = {c.value: c.value.replace("_", " ").capitalize() for c in Category}
+CATEGORIES = {"breakfast": "Breakfast", "mid_morning_snack": "Morning snack", "lunch": "Lunch",
+              "mid_afternoon_snack": "Afternoon snack", "dinner": "Dinner", "evening_snack": "Evening snack"}
 IMPORT_FROM = {"breakfast": "breakfast", "lunch": "dinner", "dinner": "dinner"}
 MealTime = Annotated[str | None, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")]
 

@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Food diary{% endblock %}
+{% block content %}
+{% set v = view %}
+<main id="main" class="page today" data-day="{{ day.isoformat() }}">
+  <header class="page-head">
+    <div><p class="eyebrow">{{ date_label }}</p><h1>{{ title }}</h1></div>
+    <div class="head-actions">
+      <label class="icon-btn date-pick" title="Pick a date">{{ icon('calendar') }}<span class="sr-only">Pick a date</span><input id="day-picker" type="date" value="{{ day }}" max="{{ today }}" aria-label="Pick a date"></label>
+      <a class="icon-btn phone-only" href="/settings" aria-label="Settings">{{ icon('settings') }}</a>
+    </div>
+  </header>
+
+  <nav class="week-strip" aria-label="Days this week">
+    <a class="strip-step" href="/?date={{ v.week_start - timedelta_7 }}" aria-label="Previous week">{{ icon('left', 18) }}</a>
+    {% for d in v.strip %}
+    {% if d.future %}<span class="day-cell is-future" aria-hidden="true"><span class="dow">{{ d.dow }}</span><span class="num">{{ d.num }}</span><span class="day-dot"></span></span>
+    {% else %}<a class="day-cell{{ ' is-selected' if d.selected else '' }}" href="/?date={{ d.iso }}" aria-label="{{ d.label }}" {% if d.selected %}aria-current="date"{% endif %}><span class="dow">{{ d.dow }}</span><span class="num">{{ d.num }}</span><span class="day-dot {{ d.dot or "" }}"></span></a>{% endif %}
+    {% endfor %}
+    {% if v.week_start + timedelta_7 <= today %}<a class="strip-step" href="/?date={{ v.week_start + timedelta_7 }}" aria-label="Next week">{{ icon('right', 18) }}</a>{% else %}<span class="strip-step" aria-hidden="true"></span>{% endif %}
+  </nav>
+
+  <section class="tiles three" aria-label="Day summary">
+    <div class="tile soft"><span class="tile-label">Logged</span><span class="tile-value">{{ v.count }} <small>{{ 'meal' if v.count == 1 else 'meals' }}</small></span></div>
+    <div class="tile {{ 'amber' if v.symptoms.tone == 'amber' else 'soft' }}"><span class="tile-label">Symptoms</span><span class="tile-text">{{ v.symptoms.value }}</span></div>
+    {% if v.steps %}<a class="tile blue" href="/health?start={{ day }}&amp;end={{ day }}"><span class="tile-label">Steps</span><span class="tile-value">{{ v.steps }}</span></a>
+    {% else %}<a class="tile soft" href="{{ '/health' if garmin_connected else '/settings#garmin' }}"><span class="tile-label">Steps</span><span class="tile-text muted">{{ 'Not synced' if garmin_connected else 'Link Garmin' }}</span></a>{% endif %}
+  </section>
+
+  <section class="meals" aria-labelledby="meals-heading">
+    <div class="section-title">
+      <h2 id="meals-heading">Meals &amp; drinks</h2>
+      {% if sheet.copies %}
+      <details class="copy-menu">
+        <summary class="link-btn">Copy from yesterday</summary>
+        <div class="menu" role="menu">
+          {% for c in sheet.copies %}<button type="button" role="menuitem" data-copy="{{ loop.index0 }}" {% if c.target in data.meals %}disabled title="Already logged today"{% endif %}><strong>{{ c.label }}</strong><span>{{ c.food }}</span></button>{% endfor %}
+        </div>
+      </details>
+      {% endif %}
+    </div>
+    <ol class="timeline" id="timeline">
+      {% for item in v.timeline %}
+        {% if v.now_at == loop.index0 %}<li class="now-row" aria-label="Now, {{ v.now }}"><span class="now-time">{{ v.now }}</span><span class="now-line"><i></i><b></b><em>Now</em></span></li>{% endif %}
+        {% set m = item.meal %}
+        {% if m %}
+        <li class="tl-row has-meal" id="slot-{{ item.key }}">
+          <div class="tl-rail"><span class="tl-time">{{ m.time or '' }}</span><span class="rail"></span></div>
+          <article class="meal-card" aria-label="{{ item.label }}{% if m.time %} at {{ m.time }}{% endif %}">
+            <div class="meal-card-head"><span class="caps">{{ item.label }}</span><button class="icon-btn small" type="button" data-edit="{{ item.key }}" aria-label="Edit {{ item.label|lower }}">{{ icon('more', 20) }}</button></div>
+            <ul class="chips" aria-label="Food and drink">{% for c in item.chips %}<li class="chip">{{ c }}</li>{% endfor %}</ul>
+            {% if item.watch %}<p class="watch-note">{{ icon('pulse', 16) }}{{ item.watch }}</p>{% endif %}
+            {% if m.symptom_status == 'reported' %}<button class="symptom-note" type="button" data-feel="{{ item.key }}"><span class="caps">Symptoms</span>{{ m.symptoms }}</button>
+            {% elif m.symptom_status == 'none' %}<p class="no-symptoms">{{ icon('check', 16) }}No symptoms</p>
+            {% else %}<button class="feel-btn" type="button" data-feel="{{ item.key }}">{{ icon('plus', 16) }}How did you feel after?</button>{% endif %}
+          </article>
+        </li>
+        {% else %}
+        <li class="tl-row" id="slot-{{ item.key }}">
+          <div class="tl-rail"><span class="rail"></span></div>
+          <button class="empty-slot" type="button" data-add="{{ item.key }}">{{ icon('plus', 18) }}{{ item.label }}</button>
+        </li>
+        {% endif %}
+      {% endfor %}
+      {% if v.now_at == v.timeline|length %}<li class="now-row" aria-label="Now, {{ v.now }}"><span class="now-time">{{ v.now }}</span><span class="now-line"><i></i><b></b><em>Now</em></span></li>{% endif %}
+    </ol>
+  </section>
+
+  <section class="other-info" aria-labelledby="notes-heading">
+    <h2 id="notes-heading">Other info</h2>
+    <button class="note-button{{ ' has-note' if data.note.text else '' }}" type="button" id="open-notes">{{ data.note.text or 'Sleep, stress, exercise, symptoms between meals, anything unusual…' }}</button>
+  </section>
+  <p class="page-foot muted small">Times in {{ timezone.replace('_', ' ') }}</p>
+</main>
+
+<dialog class="sheet" id="log-sheet" aria-labelledby="sheet-title">
+  <form id="log-form" novalidate>
+    <span class="sheet-grip" aria-hidden="true"></span>
+    <div class="sheet-head"><h2 id="sheet-title">Add to {{ title|lower if title in ('Today', 'Yesterday') else day.strftime('%a %-d %b') }}</h2><button class="icon-btn" type="button" data-close aria-label="Close">{{ icon('close') }}</button></div>
+    <div class="sheet-body">
+      <fieldset class="field-group">
+        <legend class="sr-only">Meal</legend>
+        <div class="pills" id="slot-pills">{% for key, label in sheet.slots.items() %}<button type="button" class="pill" data-slot="{{ key }}" aria-pressed="false">{{ label }}</button>{% endfor %}</div>
+        <div class="when">
+          <label class="when-time">{{ icon('clock', 20) }}<span class="sr-only">Time</span><input id="log-time" type="time" name="time"><span class="now-tag" id="now-tag">· now</span></label>
+          <label class="when-date"><span class="sr-only">Date</span><input id="log-date" type="date" name="date" value="{{ day }}" max="{{ today }}"></label>
+        </div>
+      </fieldset>
+
+      <div class="field-group">
+        <label class="caps" for="food-input">What did you have?</label>
+        <div class="chip-input" id="chip-input">
+          <ul class="chips" id="food-chips"></ul>
+          <input id="food-input" placeholder="Add food or drink, e.g. coffee" autocomplete="off" enterkeyhint="done">
+        </div>
+        <p class="hint">Press Enter or add a comma after each item.</p>
+        <div class="often" id="often" hidden><span class="hint">You often have</span><div class="pills" id="often-list"></div></div>
+        <button type="button" class="repeat-btn" id="repeat-btn" hidden>{{ icon('repeat', 20) }}<span><strong id="repeat-label"></strong><span id="repeat-food"></span></span></button>
+      </div>
+
+      <div class="field-group feeling" id="feeling">
+        <span class="caps" id="feel-label">How are you feeling?</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="feel-label">
+          <button type="button" role="radio" data-status="unrecorded" aria-checked="true">Not now</button>
+          <button type="button" role="radio" data-status="none" aria-checked="false">No symptoms</button>
+          <button type="button" role="radio" data-status="reported" aria-checked="false">Had symptoms</button>
+        </div>
+        <p class="hint" id="feel-hint"></p>
+        <div class="symptoms" id="symptom-fields" hidden>
+          <div class="pills" id="symptom-chips">{% for s in ('Pain', 'Bloating', 'Cramps', 'Diarrhoea', 'Urgency', 'Nausea', 'Burning', 'Wind', 'Reflux', 'Tired') %}<button type="button" class="pill symptom" data-symptom="{{ s }}" aria-pressed="false">{{ s }}</button>{% endfor %}</div>
+          <div class="scale">
+            <div class="scale-head"><span id="sev-label">Severity <span class="optional">· optional</span></span><span class="scale-value" id="sev-value"></span></div>
+            <div class="boxes six" role="radiogroup" aria-labelledby="sev-label">{% for n in range(6) %}<button type="button" class="box" role="radio" data-sev="{{ n }}" aria-checked="false">{{ n }}</button>{% endfor %}</div>
+            <div class="scale-ends"><span>None</span><span>Severe</span></div>
+          </div>
+          <div class="scale">
+            <div class="scale-head"><span id="stool-label">Stool form <span class="optional">· optional</span></span></div>
+            <div class="boxes seven" role="radiogroup" aria-labelledby="stool-label">{% for n in range(1, 8) %}<button type="button" class="box" role="radio" data-stool="{{ n }}" aria-checked="false" aria-label="Bristol type {{ n }}">{{ n }}</button>{% endfor %}</div>
+            <p class="hint">Bristol scale: 1 hard · 4 normal · 7 watery</p>
+          </div>
+          <label class="sr-only" for="symptom-notes">Symptom notes</label>
+          <textarea id="symptom-notes" rows="2" maxlength="4000" placeholder="Notes, e.g. started about an hour after"></textarea>
+          <p class="hint">Saved as text: <span id="symptom-preview" class="preview"></span></p>
+        </div>
+      </div>
+      <p class="error" id="log-error" role="alert" hidden></p>
+    </div>
+    <div class="sheet-foot">
+      <button type="button" class="btn danger-text" id="delete-meal" hidden>Delete</button>
+      <button type="submit" class="btn primary grow" id="save-meal">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="sheet" id="notes-sheet" aria-labelledby="notes-title">
+  <form id="notes-form" data-version="{{ data.note.version }}">
+    <span class="sheet-grip" aria-hidden="true"></span>
+    <div class="sheet-head"><h2 id="notes-title">Other info</h2><button class="icon-btn" type="button" data-close aria-label="Close">{{ icon('close') }}</button></div>
+    <div class="sheet-body">
+      <label class="caps" for="day-notes">Notes for {{ date_label }}</label>
+      <textarea id="day-notes" name="text" rows="7" maxlength="10000" placeholder="Sleep, stress, exercise, symptoms between meals, anything unusual…">{{ data.note.text }}</textarea>
+      <p class="error" id="notes-error" role="alert" hidden></p>
+    </div>
+    <div class="sheet-foot"><span class="hint" id="notes-status" role="status"></span><button class="btn primary grow" type="submit">Save notes</button></div>
+  </form>
+</dialog>
+<script type="application/json" id="today-data">{{ sheet|tojson }}</script>
+<noscript><p class="noscript">Turn on JavaScript to add and edit diary entries.</p></noscript>
+{% endblock %}

@@ -287,7 +287,9 @@ def test_sync_reuses_and_renews_tokens_and_fills_the_diary(client, app, account)
     assert health["summary"]["sleep"]["score"] == 82 and health["summary"]["sleep"]["avg_overnight_hrv"] == 54
     assert health["activities"][0]["name"] == "Morning Run"
     page = client.get(f"/?date={day - timedelta(days=1)}").text
-    assert "From your Garmin" in page and "11,234" in page and "7h 32m" in page and "Morning Run" in page
+    assert '<span class="tile-label">Steps</span><span class="tile-value">11,234</span>' in page  # Today's steps tile
+    page = client.get(f"/health?start={day - timedelta(days=1)}&end={day - timedelta(days=1)}").text
+    assert "More from your watch" in page and "7h 32m" in page and "Morning Run" in page and "54 ms" in page
     # A workout deleted in Garmin Connect disappears on the next sync of that range.
     account.activities = []
     client.post("/api/garmin/sync", json={"days": 2})
@@ -417,28 +419,28 @@ def test_history_download_stops_when_rate_limit_persists_and_blocks_parallel_syn
 
 def test_health_page_states(client, app, account):
     page = client.get("/health").text
-    assert "Link your Garmin to see trends" in page and 'href="/settings#garmin"' in page
+    assert "Link your Garmin to see your days" in page and 'href="/settings#garmin"' in page
     client.post("/api/garmin/key", json={"api_key": KEY})
     empty = client.get("/health?period=7").text
-    assert "0 of 7 days" in empty and "No watch readings for these days" in empty
+    assert "No watch readings for these days" in empty
     day = today()
     account.empty_days = {(day - timedelta(days=n)).isoformat() for n in (0, 1, 2, 5)}
     client.post("/api/garmin/history", json={"days": 30})
     wait_for_job(app)
     default = client.get("/health").text
-    assert "of 1 day<" in default and 'value="1" checked' in default  # Health opens on today
+    assert "No watch readings for this day" in default and 'href="/health?period=1" aria-current="page"' in default  # Health opens on today
     page = client.get("/health?period=30").text
     assert "26 of 30 days" in page and "Steps per day" in page and "11,234" in page and "49.0" in page
     assert "No watch readings · 3 days" in page  # today and the two days before collapse into one row
     assert page.count("class=\"col sel\"") == 4  # the latest worn day is selected in all four charts
-    assert "Show all 30 days" in page and 'aria-current="page">Health' in page
+    assert "Show all 30 days" in page and 'href="/health" aria-current="page"' in page
     assert client.get("/health?start=2026-01-01&end=2026-12-31").status_code == 200
     custom = client.get(f"/health?start={day - timedelta(days=200)}&end={day}").text
     assert "of 93 days" in custom
     chosen = day - timedelta(days=10)
     assert f'id="sel-view" href="/?date={chosen}"' in client.get(f"/health?period=30&day={chosen}").text
     diary = client.get(f"/?date={day - timedelta(days=3)}").text
-    assert "See how this compares over 30 days" in diary
+    assert f'href="/health?start={day - timedelta(days=3)}&amp;end={day - timedelta(days=3)}"' in diary  # steps tile opens the day
 
 
 def test_health_view_model():
@@ -485,15 +487,16 @@ def test_one_day_shows_every_metric_every_15_minutes_and_longer_periods_day_by_d
                                                           "symptoms": "", "expected_version": 0})
     assert client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)}).json()["warnings"] == []
     page = client.get(f"/health?start={day}&end={day}").text
-    assert "Through the day" in page and "Day by day" not in page and 'id="log-heading"' not in page
-    assert ">The day</h2>" in page and "<dt>Steps</dt><dd>11,234</dd><span>Goal 10,000</span>" in page
-    assert "<dd>49<small> bpm</small></dd><span>Range 45–171 bpm</span>" in page and "<span>Peak 92</span>" in page
-    assert [m for m in ("steps", "hr", "stress", "bb") if f'data-metric="{m}"' in page] == ["steps", "hr", "stress", "bb"]
-    assert "Peak 119 bpm at 07:45 · average 90" in page and "resting 49" in page and "66 → 51" in page
-    # Steps and stress levels aren't shared by this account: the day's figures show, with a note.
-    assert "11,234<small> steps" in page and "Your API key only gives the day’s figure." in page
-    assert '1 stress period, 0h 55m. Your API key only gives the day’s figure. <a href="/settings#garmin-account">' in page
-    assert 'title="Breakfast 06:40"' in page and 'title="Morning Run, 06:15–06:46"' in page
+    assert "Your day with meals" in page and "Day by day" not in page and 'id="log-heading"' not in page
+    assert '<span class="tile-label">Steps</span><span class="tile-value">11,234</span>' in page and "Goal of 10,000 passed" in page
+    assert "49 <small>bpm</small>" in page and "Day range 45–171" in page and "28 <small>avg</small>" in page
+    lanes = [m for m in ("hr", "stress", "steps", "bb") if f'class="lane {m}"' in page]
+    assert lanes == ["hr", "stress", "steps", "bb"] and "resting 49" in page and "66 → 51" in page and ">119</span>" in page
+    # Steps and stress levels aren't shared by this account: the lanes say so and point to the sign-in.
+    assert page.count("Daily figure only") == 2 and 'href="/settings#garmin-account">Sign in to your Garmin account</a>' in page
+    # After breakfast: what the watch measured in the next two hours, and the symptoms as recorded.
+    assert "Around breakfast · 06:40" in page and "<span>Peak HR</span><b>119</b>" in page and '<b class="green">None</b>' in page
+    assert 'title="Morning Run, 06:15–06:46"' in page and "More from your watch" in page and "7h 32m" in page
     assert "<td>06:15</td><td>71 bpm</td><td>68–74</td><td>61</td>" in page
     # Longer periods chart day by day, and each day links to its 15-minute view.
     week = client.get("/health?period=7").text
@@ -502,7 +505,7 @@ def test_one_day_shows_every_metric_every_15_minutes_and_longer_periods_day_by_d
     from app.models import HealthTimeline
     with app.state.sessions.begin() as db:
         db.query(HealthTimeline).delete()
-    assert "No 15-minute readings for this day yet. Sync to bring them in." in client.get(f"/health?start={day}&end={day}").text
+    assert "No 15-minute readings for this day yet: sync to bring them in." in client.get(f"/health?start={day}&end={day}").text
     client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
     # Claude reads the slots, optionally only a window such as the hour after breakfast.
     token = client.post("/oauth/token", data=oauth_grant(client)).json()["access_token"]
@@ -613,7 +616,7 @@ def test_garmin_account_sign_in_with_code_brings_steps_and_stress(client, app, a
         # Tokens Garmin refreshed during the sync are saved for next time.
         assert "token-refreshed" in app.state.garmin.decrypt(db.get(GarminAccount, 1).account_tokens)
     page = client.get(f"/health?start={day}&end={day}").text
-    assert 'class="sbar steps"' in page and "Busiest 15 minutes 800 at 07:45" in page and 'class="sbar medium"' in page
+    assert 'class="sbar steps"' in page and 'class="sbar up"' in page and "Daily figure only" not in page
     assert "<td>06:15</td><td>200</td><td>71 bpm</td>" in page
     probes = client.get("/api/garmin").json()["fifteen_minute_data"]
     assert probes["steps"]["result"] == "available" and probes["stress"]["result"] == "available"
