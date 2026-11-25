@@ -11,7 +11,7 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.garmin import ApiError, build_timeline, summarize_activity, summarize_day
+from app.garmin import ApiError, battery_events, build_timeline, summarize_activity, summarize_day
 from app.main import create_app
 from app.models import GarminAccount
 from tests.test_app import login, oauth_grant
@@ -54,9 +54,25 @@ def heart_day(day):
             "heartRateValues": values, "restingHeartRate": 49}
 
 
+def gmt(day, hour, minute=0):
+    return datetime.fromtimestamp(local_ms(day, hour, minute) / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0")
+
+
+def stress_day(day):
+    # Every 3 minutes from 14:00 to 14:57: 20, 23, 26 ... 77, plus Garmin's -1/-2 "no score" readings.
+    values = [[local_ms(day, 14, m), 20 + m] for m in range(0, 60, 3)] + [[local_ms(day, 15, 0), -1], [local_ms(day, 15, 3), -2]]
+    return {**day_window(day), "stressValueDescriptorsDTOList": [{"key": "timestamp", "index": 0}, {"key": "stressLevel", "index": 1}],
+            "stressValuesArray": values}
+
+
 def battery_day(day):
     values = [[local_ms(day, 6, m), "MEASURED", 70 - m // 3, 3] for m in range(0, 60, 3)]
-    return {"date": day, **day_window(day), "bodyBatteryValuesArray": values,
+    sydney = int(datetime.fromisoformat(f"{day}T12:00").replace(tzinfo=SYDNEY).utcoffset().total_seconds() * 1000)
+    events = [{"eventType": "STRESS", "eventStartTimeGmt": gmt(day, 14, 10), "timezoneOffset": sydney,
+               "durationInMilliseconds": 55 * 60000, "bodyBatteryImpact": -6, "shortFeedback": "STRESSFUL_PERIOD"},
+              {"eventType": "RECOVERY", "eventStartTimeGmt": gmt(day, 23, 30), "timezoneOffset": sydney,
+               "durationInMilliseconds": 90 * 60000, "bodyBatteryImpact": 4}]
+    return {"date": day, **day_window(day), "bodyBatteryValuesArray": values, "bodyBatteryActivityEvent": events,
             "bodyBatteryValueDescriptorDTOList": [
                 {"bodyBatteryValueDescriptorIndex": 0, "bodyBatteryValueDescriptorKey": "timestamp"},
                 {"bodyBatteryValueDescriptorIndex": 1, "bodyBatteryValueDescriptorKey": "bodyBatteryStatus"},
@@ -74,6 +90,7 @@ class FakeGarmin:
     def __init__(self):
         self.valid_key, self.issued, self.revoked, self.fail = KEY, [], set(), None
         self.activities, self.calls, self.wrapped_sleep, self.empty_days = None, [], True, set()
+        self.serves_stress = False  # dailyStress isn't in the Personal API's published list
 
     def exchange(self, api_key):
         if api_key != self.valid_key:
@@ -99,6 +116,8 @@ class FakeGarmin:
             return HRV
         if path.startswith("/metrics-service/metrics/maxmet/daily/"):
             raise ApiError(404)
+        if path.startswith("/wellness-service/wellness/dailyStress/") and self.serves_stress:
+            return stress_day(path.rsplit("/", 1)[1])
         if path == "/wellness-service/wellness/dailyHeartRate":
             return heart_day(params["date"])
         if path == "/wellness-service/wellness/bodyBattery/reports/daily":
@@ -124,7 +143,10 @@ def app(tmp_path, monkeypatch, account):
     url = "sqlite:///" + (tmp_path / "diary.db").as_posix()
     monkeypatch.setenv("DATABASE_URL", url)
     command.upgrade(Config("alembic.ini"), "head")
-    return create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_http=account)
+    app = create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_http=account)
+    app.state.garmin.slept = []  # pacing and back-off are recorded, not waited for
+    app.state.garmin.sleep = app.state.garmin.slept.append
+    return app
 
 
 @pytest.fixture
@@ -248,35 +270,64 @@ def wait_for_job(app):
     return app.state.garmin.job_status()
 
 
-def test_history_download_runs_in_background_chunks(client, app, account):
+def test_history_download_runs_in_paced_weekly_batches_and_skips_finished_days(client, app, account):
+    from app import garmin
     assert client.post("/api/garmin/history", json={"days": 182}).json()["detail"].startswith("Garmin isn’t connected")
     client.post("/api/garmin/key", json={"api_key": KEY})
     started = client.post("/api/garmin/history", json={"days": 182})
     assert started.status_code == 200 and started.json()["total_days"] == 182
     job = wait_for_job(app)
     assert job["state"] == "done" and job["done_days"] == 182 and job["days_synced"] == 182 and job["error"] is None
-    # 182 days = six 31-day chunks (the last one shorter), one activity search per chunk.
+    # 182 days = 26 batches of a week, one activity search each, with a pause between batches
+    # and requests spaced out within them.
     searches = [c for c in account.calls if c[0] == "/activitylist-service/activities/search/activities"]
-    assert len(searches) == 6
+    assert len(searches) == 26
+    slept = app.state.garmin.slept
+    assert slept.count(garmin.BATCH_PAUSE) == 25 and all(0 < t <= garmin.REQUEST_GAP for t in slept if t != garmin.BATCH_PAUSE)
     assert client.get("/api/garmin").json()["synced_days"]["count"] == 182
+    # Downloading again only asks Garmin for days that weren't finished (today, and yesterday before 6 am).
+    account.calls.clear()
+    client.post("/api/garmin/history", json={"days": 182})
+    job = wait_for_job(app)
+    assert job["state"] == "done" and job["skipped_days"] >= 180 and job["days_synced"] + job["skipped_days"] == 182
+    assert len([c for c in account.calls if c[0] == "/usersummary-service/usersummary/daily"]) == job["days_synced"] <= 2
     assert client.post("/api/garmin/history", json={"days": 800}).status_code == 422
 
 
-def test_history_download_stops_on_rate_limit_and_blocks_parallel_syncs(client, app, account):
-    client.post("/api/garmin/key", json={"api_key": KEY})
-    calls = {"n": 0}
+def limited(account, calls_before, failures, retry_after=None):
+    """Make Garmin answer HTTP 429 after some requests, for a number of requests (or for good)."""
+    count = {"n": 0}
     original = account.get
-    def slow_then_limited(token, path, params=None):
-        calls["n"] += 1
-        if calls["n"] > 40:
-            raise ApiError(429)
+    def get(token, path, params=None):
+        count["n"] += 1
+        if count["n"] > calls_before and (failures is None or count["n"] <= calls_before + failures):
+            raise ApiError(429, retry_after=retry_after)
         return original(token, path, params)
-    account.get = slow_then_limited
+    account.get = get
+
+
+def test_history_download_waits_out_garmin_rate_limit(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    limited(account, calls_before=10, failures=3, retry_after=90)
+    client.post("/api/garmin/history", json={"days": 14})
+    job = wait_for_job(app)
+    assert job["state"] == "done" and job["days_synced"] == 14 and job["waits"] == 3 and job["waiting_until"] is None
+    assert [t for t in app.state.garmin.slept if t >= 20] == [90, 120, 240, 20.0]  # Retry-After, back-off, batch pause
+
+
+def test_history_download_stops_when_rate_limit_persists_and_blocks_parallel_syncs(client, app, account):
+    from app import garmin
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    limited(account, calls_before=40, failures=None)
     client.post("/api/garmin/history", json={"days": 90})
     job = wait_for_job(app)
-    assert job["state"] == "failed" and "limiting" in job["error"] and 0 < job["days_synced"] < 90
+    assert job["state"] == "failed" and "still limiting" in job["error"] and "days already downloaded are skipped" in job["error"]
+    assert job["waits"] == len(garmin.BACKOFF) and 0 < job["days_synced"] < 90
     page = client.get("/health").text
     assert "Garmin is limiting requests right now" in page
+    # A sync someone is waiting on reports the limit straight away instead of waiting.
+    assert "limiting" in client.post("/api/garmin/sync", json={}).json()["detail"]
+    assert app.state.garmin.patient is False
     app.state.garmin.lock.acquire()
     try:
         assert "already running" in client.post("/api/garmin/history", json={"days": 7}).json()["detail"]
@@ -391,3 +442,49 @@ def test_timeline_view_breaks_lines_at_gaps():
     assert v["summary"]["bb_range"] == "High 80 at 06:00 · low 70 at 09:00" and v["hr_lo"] == 50 and v["hr_hi"] == 100
     assert [m["label"] for m in v["meals"]] == ["Lunch 12:30"]
     assert not health_view.timeline(date(2026, 11, 19), [], [], {})["has_data"]
+    with_stress = health_view.timeline(date(2026, 11, 19), [{"time": "14:00", "stress": 80, "stress_max": 90}], [], {},
+                                       [{"type": "stress", "start": "14:00", "end": "15:30"}, {"type": "sleep", "start": "00:00", "end": "06:00"}])
+    assert [b["band"] for b in with_stress["stress_bars"]] == ["high"] and [p["kind"] for p in with_stress["periods"]] == ["stress"]
+    assert with_stress["summary"]["stress_periods"] == "1 stress period, 1h 30m" and with_stress["summary"]["stress_peak"] == "Peak 90 at 14:00"
+    assert [health_view.stress_band(v) for v in (0, 25, 26, 51, 76)] == ["rest", "rest", "low", "medium", "high"]
+
+
+def test_stress_levels_and_body_battery_events():
+    day = "2026-11-19"
+    slots = build_timeline(date.fromisoformat(day), None, None, SYDNEY, stress_day(day))
+    # 14:00-14:15 holds 20, 23 ... 32; the negative "no score" readings at 15:00 leave no slot.
+    assert slots[0] == {"time": "14:00", "stress": 26, "stress_max": 32} and [s["time"] for s in slots][-1] == "14:45"
+    events = battery_events(date.fromisoformat(day), battery_day(day), SYDNEY)
+    # The recovery that runs past midnight is cut at the end of the day.
+    assert events == [{"type": "stress", "start": "14:10", "end": "15:05", "body_battery_impact": -6, "feedback": "STRESSFUL_PERIOD"},
+                      {"type": "recovery", "start": "23:30", "end": "24:00", "body_battery_impact": 4}]
+    assert battery_events(date.fromisoformat("2026-11-20"), battery_day(day), SYDNEY) == [
+        {"type": "recovery", "start": "00:00", "end": "01:00", "body_battery_impact": 4}]
+    assert battery_events(date.fromisoformat(day), {"bodyBatteryActivityEvent": [{"eventType": "STRESS"}, "x"]}) == []
+
+
+def test_stress_detail_is_tried_once_and_used_when_garmin_serves_it(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    day = today() - timedelta(days=1)
+    stress_calls = lambda: [c for c in account.calls if c[0].startswith("/wellness-service/wellness/dailyStress/")]
+    # Not served: asked once, then left alone; the sync carries on and Body Battery events still show stress.
+    assert client.post("/api/garmin/sync", json={"days": 3}).json()["warnings"] == []
+    assert len(stress_calls()) == 1 and app.state.garmin.stress_supported is False
+    page = client.get(f"/health?period=7&day={day}").text
+    assert "1 stress period, 0h 55m" in page and "Garmin doesn’t share 15-minute stress levels" in page
+    assert 'title="Stress, 14:10–15:05, Body Battery −6"' in page and "<th scope=\"col\">Highest</th>" not in page
+    # Served: levels land in the slots, the chart and Claude's timeline.
+    app.state.garmin.stress_supported, account.serves_stress = None, True
+    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
+    assert app.state.garmin.stress_supported is True
+    page = client.get(f"/health?period=7&day={day}").text
+    assert "Peak 77 at 14:45 · 1 stress period, 0h 55m" in page and 'class="sbar medium"' in page and 'class="sbar low"' in page
+    assert "<td>14:00</td><td>–</td><td>–</td><td>–</td><td>26</td><td>32</td>" in page
+    with app.state.sessions() as db:
+        timeline = __import__("app.garmin", fromlist=["x"]).health_timeline(db, day, "14:00", "14:30")
+    assert [s["stress"] for s in timeline["slots"]] == [26, 41, 56]
+    assert [e["type"] for e in timeline["events"]] == ["stress"]
+    # A day without stress readings once it has worked doesn't switch it off.
+    account.serves_stress = False
+    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
+    assert app.state.garmin.stress_supported is True
