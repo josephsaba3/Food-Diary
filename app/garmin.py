@@ -27,7 +27,12 @@ TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
 KEY_PAGE = "https://connect.garmin.com/app/settings/personalApiToken"
 TOKEN_REFRESH_WINDOW = 3600  # Get a fresh token when less than an hour remains, as Garmin's client does.
 ACTIVITY_PAGE_SIZE = 100
-CHUNK_DAYS = 31        # Longer downloads run as a background job in chunks of this size.
+CHUNK_DAYS = 31        # Most days one sync request may cover (Garmin's Body Battery report limit).
+BATCH_DAYS = 7         # Background downloads fetch this many days, then pause.
+BATCH_PAUSE = float(os.getenv("GARMIN_BATCH_PAUSE", "20"))   # seconds between batches
+REQUEST_GAP = float(os.getenv("GARMIN_REQUEST_GAP", "1"))    # seconds between requests in background downloads
+QUICK_GAP = 0.3        # ...and in a sync someone is waiting on
+BACKOFF = (60, 120, 240, 480, 900, 900)  # waits when Garmin says to slow down: about 45 minutes in all
 MAX_HISTORY_DAYS = 731 # Two years.
 SLOT_MINUTES = 15     # Heart rate and Body Battery are kept through the day in slots this long.
 
@@ -37,9 +42,16 @@ class GarminError(RuntimeError):
 
 
 class ApiError(Exception):
-    def __init__(self, status, text=""):
+    def __init__(self, status, text="", retry_after=None):
         super().__init__(f"Garmin returned HTTP {status}")
-        self.status, self.text = status, text
+        self.status, self.text, self.retry_after = status, text, retry_after
+
+
+def retry_after(response):
+    try:
+        return max(0, min(3600, int(response.headers.get("Retry-After", ""))))
+    except ValueError:
+        return None
 
 
 class GarminHTTP:
@@ -55,7 +67,7 @@ class GarminHTTP:
         except requests.RequestException as error:
             raise ApiError(0, str(error)) from error
         if not response.ok:
-            raise ApiError(response.status_code, response.text[:500])
+            raise ApiError(response.status_code, response.text[:500], retry_after(response))
         return response.text.strip()
 
     def get(self, token, path, params=None):
@@ -65,7 +77,7 @@ class GarminHTTP:
         except requests.RequestException as error:
             raise ApiError(0, str(error)) from error
         if not response.ok:
-            raise ApiError(response.status_code, response.text[:500])
+            raise ApiError(response.status_code, response.text[:500], retry_after(response))
         return response.json() if response.content else None
 
 
@@ -445,6 +457,10 @@ class GarminLink:
         self.fernet = Fernet(base64.urlsafe_b64encode(key))
         self.lock = threading.Lock()
         self.stress_supported = None  # unknown until Garmin answers a dailyStress request
+        # Request pacing. Background downloads space requests out and wait out Garmin's rate limit
+        # ("patient"); a sync someone is waiting on uses a short gap and reports the limit at once.
+        self.sleep, self.gap, self.patient, self.last_request = time.sleep, QUICK_GAP, False, 0.0
+        self.job = None
 
     def encrypt(self, value):
         return self.fernet.encrypt(value.encode()).decode()
@@ -527,15 +543,39 @@ class GarminLink:
                 account.access_token, account.token_expires_at = self.encrypt(token), token_expiry(token)
         return token
 
-    def _get(self, path, params=None):
+    def _get(self, path, params=None, renew=True):
+        """GET with pacing; in background downloads, wait and retry when Garmin says to slow down (HTTP 429)."""
+        attempt = 0
+        while True:
+            wait = self.last_request + self.gap - time.monotonic()
+            if wait > 0:
+                self.sleep(wait)
+            self.last_request = time.monotonic()
+            try:
+                return self._fetch(path, params, renew)
+            except ApiError as error:
+                if error.status != 429 or not self.patient or attempt >= len(BACKOFF):
+                    raise
+                pause = max(BACKOFF[attempt], error.retry_after or 0)
+                attempt += 1
+                self._set_job(waiting_until=(utcnow() + timedelta(seconds=pause)).isoformat(),
+                              waits=(self.job or {}).get("waits", 0) + 1)
+                self.sleep(pause)
+                self._set_job(waiting_until=None)
+
+    def _fetch(self, path, params, renew):
         token = self._token()
         try:
             return self.http.get(token, path, params)
         except ApiError as error:
-            if error.status != 401:
+            if error.status != 401 or not renew:
                 raise
         # A token can be revoked before it expires; get a new one once.
         return self.http.get(self._token(force=True), path, params)
+
+    def _set_job(self, **values):
+        if self.job and self.job.get("state") == "running":
+            self.job.update(values)
 
     def _record_error(self, message):
         with self.sessions.begin() as db:
@@ -579,7 +619,7 @@ class GarminLink:
         if getattr(self, "stress_supported", None) is False:
             return None
         try:
-            data = self.http.get(self._token(), f"/wellness-service/wellness/dailyStress/{iso}")
+            data = self._get(f"/wellness-service/wellness/dailyStress/{iso}", renew=False)
         except ApiError as error:
             if error.status in (0, 429):
                 raise
@@ -591,8 +631,8 @@ class GarminLink:
             return data
         return None
 
-    def _sync(self, start, end, on_day=None):
-        warnings, synced, activities_synced, stopped = [], 0, None, None
+    def _sync(self, start, end, on_day=None, skip=frozenset()):
+        warnings, synced, activities_synced, stopped, skipped = [], 0, None, None, 0
         try:
             vo2_by_day = {}
             for entry in self._optional(warnings, "VO2 max", f"/metrics-service/metrics/maxmet/daily/{start}/{end}") or []:
@@ -612,6 +652,11 @@ class GarminLink:
             for offset in range((end - start).days + 1):
                 day = start + timedelta(days=offset)
                 iso = day.isoformat()
+                if day in skip:
+                    skipped += 1
+                    if on_day:
+                        on_day()
+                    continue
                 stats = self._optional(warnings, f"{iso}: daily summary", "/usersummary-service/usersummary/daily", {"calendarDate": iso})
                 sleep = self._optional(warnings, f"{iso}: sleep", "/sleep-service/sleep/dailySleep", {"date": iso})
                 hrv = self._optional(warnings, f"{iso}: HRV", f"/hrv-service/hrv/{iso}")
@@ -663,6 +708,7 @@ class GarminLink:
             activities_synced = len(kept)
         except (ApiError, GarminError) as error:
             stopped = describe(error)
+            stopped.status = getattr(error, "status", None)
             self._record_error(str(stopped))
             if not synced:
                 raise stopped from error
@@ -673,15 +719,32 @@ class GarminLink:
                     account.last_sync_at, account.last_error = utcnow(), ""
         return {"start": start.isoformat(), "end": end.isoformat(), "days_synced": synced,
                 "activities_synced": activities_synced, "stopped_early": str(stopped) if stopped else None,
+                "stopped_status": stopped.status if stopped else None, "skipped_days": skipped,
                 "warnings": warnings[:20]}
 
     # Background history download -------------------------------------------
 
     def job_status(self):
-        return dict(self.job) if getattr(self, "job", None) else {"state": "idle"}
+        return dict(self.job) if self.job else {"state": "idle"}
+
+    def complete_days(self, start, end):
+        """Days already downloaded in full: synced after 06:00 the next morning, with their 15-minute timeline."""
+        zone = self.zone()
+        with self.sessions() as db:
+            synced = dict(db.execute(select(HealthDay.day, HealthDay.synced_at)
+                                     .where(HealthDay.day >= start, HealthDay.day <= end)).all())
+            timelines = set(db.scalars(select(HealthTimeline.day).where(HealthTimeline.day >= start, HealthTimeline.day <= end)))
+        done = set()
+        for day, at in synced.items():
+            settled = datetime.combine(day + timedelta(days=1), datetime.min.time()).replace(hour=6, tzinfo=zone)
+            at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)  # SQLite drops the zone
+            if day in timelines and at >= settled:
+                done.add(day)
+        return done
 
     def start_job(self, start, end):
-        """Download a long range (up to two years) in 31-day chunks, newest first, on a background thread."""
+        """Download a long range (up to two years) on a background thread: newest first, in paced batches of a week,
+        skipping days already downloaded in full and waiting out Garmin's rate limit."""
         end = min(end, self.today())
         if end < start:
             raise GarminError("Choose dates up to today, with the end on or after the start.")
@@ -693,7 +756,8 @@ class GarminLink:
         if not self.lock.acquire(blocking=False):
             raise GarminError("A Garmin sync is already running. Try again in a minute.")
         self.job = {"state": "running", "start": start.isoformat(), "end": end.isoformat(), "total_days": total,
-                    "done_days": 0, "days_synced": 0, "activities_synced": 0, "error": None, "warnings": 0,
+                    "done_days": 0, "days_synced": 0, "skipped_days": 0, "activities_synced": 0, "error": None,
+                    "warnings": 0, "waits": 0, "waiting_until": None,
                     "started_at": utcnow().isoformat(), "finished_at": None}
         self.job_thread = threading.Thread(target=self._run_job, args=(start, end), daemon=True, name="garmin-history")
         self.job_thread.start()
@@ -705,25 +769,44 @@ class GarminLink:
         def tick():
             job["done_days"] += 1
 
+        self.patient, self.gap = True, REQUEST_GAP
         try:
-            chunk_end = end
-            while chunk_end >= start:
-                chunk_start = max(start, chunk_end - timedelta(days=CHUNK_DAYS - 1))
-                done_before = job["done_days"]
-                result = self._sync(chunk_start, chunk_end, on_day=tick)
-                job["done_days"] = done_before + (chunk_end - chunk_start).days + 1
-                job["days_synced"] += result["days_synced"]
-                job["activities_synced"] += result["activities_synced"] or 0
-                job["warnings"] += len(result["warnings"])
-                if result["stopped_early"]:
-                    job["error"] = result["stopped_early"]
-                    break
-                chunk_end = chunk_start - timedelta(days=1)
+            complete = self.complete_days(start, end)
+            batch_end, fetched = end, False
+            while batch_end >= start:
+                batch_start = max(start, batch_end - timedelta(days=BATCH_DAYS - 1))
+                days = {batch_start + timedelta(days=n) for n in range((batch_end - batch_start).days + 1)}
+                if days <= complete:  # nothing new here: no requests at all
+                    job["done_days"] += len(days)
+                    job["skipped_days"] += len(days)
+                else:
+                    if fetched:
+                        self.sleep(BATCH_PAUSE)
+                    result = self._sync(batch_start, batch_end, on_day=tick, skip=frozenset(days & complete))
+                    fetched = True
+                    job["days_synced"] += result["days_synced"]
+                    job["skipped_days"] += result["skipped_days"]
+                    job["activities_synced"] += result["activities_synced"] or 0
+                    job["warnings"] += len(result["warnings"])
+                    if result["stopped_early"]:
+                        job["error"] = self._stopped_message(result["stopped_status"], result["stopped_early"])
+                        break
+                batch_end = batch_start - timedelta(days=1)
         except GarminError as error:
-            job["error"] = str(error)
+            job["error"] = self._stopped_message(getattr(error, "status", None), str(error))
         except Exception as error:  # keep the thread's failure visible instead of silent
             job["error"] = f"The download stopped unexpectedly ({type(error).__name__}). Try again."
         finally:
+            self.patient, self.gap = False, QUICK_GAP
             job["state"] = "failed" if job["error"] else "done"
+            job["waiting_until"] = None
             job["finished_at"] = utcnow().isoformat()
             self.lock.release()
+
+    def _stopped_message(self, status, message):
+        if status != 429:
+            return message
+        job = self.job
+        return (f"Garmin is still limiting requests after waiting about {sum(BACKOFF) // 60} minutes, so the download "
+                f"stopped at {job['done_days']} of {job['total_days']} days. Start it again later: days already "
+                f"downloaded are skipped.")

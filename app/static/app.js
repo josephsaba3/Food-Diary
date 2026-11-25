@@ -208,7 +208,10 @@ async function watchHistory(statusEl, onDone) {
     let job;
     try { job = await api("/api/garmin/history"); } catch (error) { statusEl.textContent = error.message; return; }
     if (job.state === "running") {
-      statusEl.textContent = `Downloading from Garmin… ${job.done_days} of ${job.total_days} days`;
+      const progress = `${job.done_days} of ${job.total_days} days`;
+      statusEl.textContent = job.waiting_until
+        ? `Garmin asked to slow down, so the download is waiting. It carries on at ${new Date(job.waiting_until).toLocaleTimeString("en-AU", {hour:"numeric", minute:"2-digit"})} · ${progress}`
+        : `Downloading from Garmin a week at a time… ${progress}`;
       await new Promise(resolve => setTimeout(resolve, 1500));
       continue;
     }
@@ -219,7 +222,8 @@ async function watchHistory(statusEl, onDone) {
 function historySummary(job) {
   const days = `${job.days_synced} ${job.days_synced === 1 ? "day" : "days"} with data`;
   const workouts = `${job.activities_synced} ${job.activities_synced === 1 ? "workout" : "workouts"}`;
-  return `${days}, ${workouts}.${job.error ? " " + job.error : ""}`;
+  const skipped = job.skipped_days ? `, ${job.skipped_days} already up to date` : "";
+  return `${days}, ${workouts}${skipped}.${job.error ? " " + job.error : ""}`;
 }
 async function startHistory(body, button, statusEl, onDone) {
   if (button) button.disabled = true;
@@ -434,7 +438,7 @@ document.querySelectorAll("[data-health-sync]").forEach(button => button.addEven
   buttons.forEach(b => b.disabled = true); alert.hidden = true;
   startHistory({start: layout.dataset.start, end: layout.dataset.end}, null, status, job => {
     if (job.error) {
-      alert.textContent = /limiting/.test(job.error) ? "Garmin is limiting requests right now. Your saved days still show below. Try syncing again in a few minutes." : job.error;
+      alert.textContent = /limiting/.test(job.error) ? `${job.error} Your saved days still show below.` : job.error;
       alert.hidden = false; status.textContent = job.days_synced ? historySummary({...job, error: null}) : "";
       if (!/limiting/.test(job.error)) buttons.forEach(b => b.disabled = false);
       return;

@@ -143,7 +143,10 @@ def app(tmp_path, monkeypatch, account):
     url = "sqlite:///" + (tmp_path / "diary.db").as_posix()
     monkeypatch.setenv("DATABASE_URL", url)
     command.upgrade(Config("alembic.ini"), "head")
-    return create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_http=account)
+    app = create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_http=account)
+    app.state.garmin.slept = []  # pacing and back-off are recorded, not waited for
+    app.state.garmin.sleep = app.state.garmin.slept.append
+    return app
 
 
 @pytest.fixture
@@ -267,35 +270,64 @@ def wait_for_job(app):
     return app.state.garmin.job_status()
 
 
-def test_history_download_runs_in_background_chunks(client, app, account):
+def test_history_download_runs_in_paced_weekly_batches_and_skips_finished_days(client, app, account):
+    from app import garmin
     assert client.post("/api/garmin/history", json={"days": 182}).json()["detail"].startswith("Garmin isn’t connected")
     client.post("/api/garmin/key", json={"api_key": KEY})
     started = client.post("/api/garmin/history", json={"days": 182})
     assert started.status_code == 200 and started.json()["total_days"] == 182
     job = wait_for_job(app)
     assert job["state"] == "done" and job["done_days"] == 182 and job["days_synced"] == 182 and job["error"] is None
-    # 182 days = six 31-day chunks (the last one shorter), one activity search per chunk.
+    # 182 days = 26 batches of a week, one activity search each, with a pause between batches
+    # and requests spaced out within them.
     searches = [c for c in account.calls if c[0] == "/activitylist-service/activities/search/activities"]
-    assert len(searches) == 6
+    assert len(searches) == 26
+    slept = app.state.garmin.slept
+    assert slept.count(garmin.BATCH_PAUSE) == 25 and all(0 < t <= garmin.REQUEST_GAP for t in slept if t != garmin.BATCH_PAUSE)
     assert client.get("/api/garmin").json()["synced_days"]["count"] == 182
+    # Downloading again only asks Garmin for days that weren't finished (today, and yesterday before 6 am).
+    account.calls.clear()
+    client.post("/api/garmin/history", json={"days": 182})
+    job = wait_for_job(app)
+    assert job["state"] == "done" and job["skipped_days"] >= 180 and job["days_synced"] + job["skipped_days"] == 182
+    assert len([c for c in account.calls if c[0] == "/usersummary-service/usersummary/daily"]) == job["days_synced"] <= 2
     assert client.post("/api/garmin/history", json={"days": 800}).status_code == 422
 
 
-def test_history_download_stops_on_rate_limit_and_blocks_parallel_syncs(client, app, account):
-    client.post("/api/garmin/key", json={"api_key": KEY})
-    calls = {"n": 0}
+def limited(account, calls_before, failures, retry_after=None):
+    """Make Garmin answer HTTP 429 after some requests, for a number of requests (or for good)."""
+    count = {"n": 0}
     original = account.get
-    def slow_then_limited(token, path, params=None):
-        calls["n"] += 1
-        if calls["n"] > 40:
-            raise ApiError(429)
+    def get(token, path, params=None):
+        count["n"] += 1
+        if count["n"] > calls_before and (failures is None or count["n"] <= calls_before + failures):
+            raise ApiError(429, retry_after=retry_after)
         return original(token, path, params)
-    account.get = slow_then_limited
+    account.get = get
+
+
+def test_history_download_waits_out_garmin_rate_limit(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    limited(account, calls_before=10, failures=3, retry_after=90)
+    client.post("/api/garmin/history", json={"days": 14})
+    job = wait_for_job(app)
+    assert job["state"] == "done" and job["days_synced"] == 14 and job["waits"] == 3 and job["waiting_until"] is None
+    assert [t for t in app.state.garmin.slept if t >= 20] == [90, 120, 240, 20.0]  # Retry-After, back-off, batch pause
+
+
+def test_history_download_stops_when_rate_limit_persists_and_blocks_parallel_syncs(client, app, account):
+    from app import garmin
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    limited(account, calls_before=40, failures=None)
     client.post("/api/garmin/history", json={"days": 90})
     job = wait_for_job(app)
-    assert job["state"] == "failed" and "limiting" in job["error"] and 0 < job["days_synced"] < 90
+    assert job["state"] == "failed" and "still limiting" in job["error"] and "days already downloaded are skipped" in job["error"]
+    assert job["waits"] == len(garmin.BACKOFF) and 0 < job["days_synced"] < 90
     page = client.get("/health").text
     assert "Garmin is limiting requests right now" in page
+    # A sync someone is waiting on reports the limit straight away instead of waiting.
+    assert "limiting" in client.post("/api/garmin/sync", json={}).json()["detail"]
+    assert app.state.garmin.patient is False
     app.state.garmin.lock.acquire()
     try:
         assert "already running" in client.post("/api/garmin/history", json={"days": 7}).json()["detail"]
