@@ -79,4 +79,5 @@ class HealthTimeline(Base):
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     slots: Mapped[str] = mapped_column(Text)
     events: Mapped[str] = mapped_column(Text, default="[]")
+    version: Mapped[int] = mapped_column(Integer, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

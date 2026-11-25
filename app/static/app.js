@@ -271,7 +271,7 @@ function applyPos(root) {
 }
 applyPos(document);
 
-// Through the day: read a 15-minute slot under the pointer, and swap in another day's charts.
+// Through the day: read the 15-minute slot under the pointer.
 function bindTimeline(section) {
   const charts = section?.querySelector(".tcharts"), readout = section?.querySelector(".t-readout");
   if (!charts || !readout) return;
@@ -287,6 +287,7 @@ function bindTimeline(section) {
     const parts = [`${time}–${until}`];
     if (!slot) parts.push("no readings");
     else {
+      if (slot.steps != null) parts.push(`${slot.steps.toLocaleString("en-AU")} steps`);
       if (slot.hr != null) parts.push(`${slot.hr} bpm avg (${slot.hr_min}–${slot.hr_max})`);
       if (slot.body_battery != null) parts.push(`Body Battery ${slot.body_battery}`);
       if (slot.stress != null) parts.push(`stress ${slot.stress}${slot.stress_max > slot.stress ? ` (peak ${slot.stress_max})` : ""}`);
@@ -306,28 +307,6 @@ function bindTimeline(section) {
   });
 }
 bindTimeline($("#timeline"));
-let timelineRequest = 0;
-async function showTimeline(iso) {
-  const current = $("#timeline");
-  if (!current || current.dataset.day === iso) return;
-  const ticket = ++timelineRequest;
-  current.setAttribute("aria-busy", "true");
-  try {
-    const response = await fetch(`/health/timeline?day=${encodeURIComponent(iso)}`, {credentials: "same-origin"});
-    if (!response.ok) throw new Error(String(response.status));
-    const html = await response.text();
-    if (ticket !== timelineRequest) return;
-    const holder = document.createElement("div");
-    holder.innerHTML = html;
-    const next = holder.querySelector("#timeline");
-    if (!next) return;
-    applyPos(next);
-    current.replaceWith(next);
-    bindTimeline(next);
-  } catch (error) {
-    if (ticket === timelineRequest) current.removeAttribute("aria-busy");
-  }
-}
 const health = $(".health-layout");
 if (health && $("#health-data")) {
   const days = JSON.parse($("#health-data").textContent);
@@ -338,6 +317,7 @@ if (health && $("#health-data")) {
   const shortDate = iso => { const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-AU", {day:"numeric", month:"short"}); };
   function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; }
   function setValue(node, value, unit) {
+    if (!node) return;  // a single day shows 15-minute charts instead
     node.replaceChildren();
     if (value == null) { node.append(el("span", "muted no-reading", "No readings")); return; }
     node.append(String(value));
@@ -357,7 +337,7 @@ if (health && $("#health-data")) {
     setValue($('[data-value="stress"]'), worn ? (day.stress ?? "–") : null, "avg");
     setValue($('[data-value="bb"]'), worn ? (day.bb_high != null ? `${day.bb_low}–${day.bb_high}` : "–") : null, "low–high");
   }
-  function select(i) { selected = i; show(i); if (days[i]) showTimeline(days[i].iso); }
+  function select(i) { selected = i; show(i); }
   document.querySelectorAll(".col").forEach(col => {
     col.addEventListener("click", () => select(Number(col.dataset.i)));
     col.addEventListener("mouseenter", () => show(Number(col.dataset.i)));
@@ -403,6 +383,7 @@ if (health && $("#health-data")) {
     $("#sheet-empty").hidden = day.worn;
     $("#sheet-tiles").replaceChildren(...(day.worn ? tilesFor(day) : []));
     $("#sheet-meals").href = $("#sheet-open").href = `/?date=${day.iso}`;
+    if ($("#sheet-detail")) $("#sheet-detail").href = `/health?start=${day.iso}&end=${day.iso}`;
     $("#sheet-meals-sub").textContent = `What you logged in the diary on ${shortDate(day.iso)}`;
     const prev = days[i - 1], next = days[i + 1];
     $("#sheet-prev").disabled = !prev; $("#sheet-next").disabled = !next;

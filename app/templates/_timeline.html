@@ -1,9 +1,13 @@
-{# One day's heart rate, Body Battery and stress in 15-minute slots. Rendered into the Health page and served alone to swap days. #}
+{# A single day on the Health page: the same four charts as "Day by day", every 15 minutes. #}
 {% set t = tl %}
-<section class="timeline-section" id="timeline" data-day="{{ t.iso }}" aria-labelledby="timeline-heading">
-  <div class="section-heading health-heading"><h2 id="timeline-heading">Through the day</h2><span class="small muted">{{ t.long }}</span></div>
+<section class="trend-section timeline-section" id="timeline" data-day="{{ t.iso }}" aria-labelledby="trend-heading">
+  <div class="section-heading health-heading"><h2 id="trend-heading">Through the day</h2><span class="small muted">Every 15 minutes</span></div>
+  <div class="selbar">
+    <div><p class="selbar-title" id="sel-title">{{ t.long }}</p><p class="small muted" id="sel-status">{{ status }}</p></div>
+    <a class="button secondary compact" id="sel-view" href="/?date={{ t.iso }}">View day{{ chevron }}</a>
+  </div>
   {% if not t.has_data %}
-  <p class="muted timeline-empty">No 15-minute readings for this day.{% if garmin_connected %} Sync it to bring them in.{% endif %}</p>
+  <p class="muted timeline-empty">No 15-minute readings for this day yet.{% if garmin_connected %} Sync to bring them in.{% endif %}</p>
   {% else %}
   {% macro overlays() %}
     {% for s in t.spans %}<span class="tspan" data-pos="left:{{ '%.3f'|format(s.left) }}%;width:{{ '%.3f'|format(s.width) }}%" title="{{ s.label }}"></span>{% endfor %}
@@ -11,61 +15,75 @@
     <span class="tcursor" hidden></span>
   {% endmacro %}
   {% macro axis() %}<div class="xl" aria-hidden="true">{% for l in t.axis %}<span class="align-{{ l.align }}" data-pos="left:{{ '%.2f'|format(l.left) }}%">{{ l.text }}</span>{% endfor %}</div>{% endmacro %}
+  {% macro bars(items) %}<svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true">{% for b in items %}<rect class="sbar {{ b.band or 'steps' }}" x="{{ b.x }}" y="{{ '%.2f'|format(b.y) }}" width="12" height="{{ '%.2f'|format(b.h) }}"/>{% endfor %}</svg>{% endmacro %}
+  {% macro value(text, unit) %}{% if text is not none %}{{ text }}{% if unit %}<small> {{ unit }}</small>{% endif %}{% else %}<span class="muted no-reading">No readings</span>{% endif %}{% endmacro %}
   <p class="small muted t-readout" aria-live="polite">Point at or tap a chart to read a 15-minute slot.</p>
   <div class="charts tcharts" data-slots='{{ t.slots|tojson }}'>
-    <div class="hchart">
-      <div class="chead"><h3>Heart rate</h3><p class="cval">{% if t.summary.hr %}{{ t.summary.hr }}<small> bpm</small>{% else %}<span class="muted no-reading">No readings</span>{% endif %}</p></div>
-      {% if t.summary.hr_peak %}<p class="small muted tsub">{{ t.summary.hr_peak }} · day average {{ t.summary.hr_avg }}</p>{% endif %}
-      <div class="plot tplot" role="img" aria-label="Heart rate through the day{% if t.summary.hr %}, {{ t.summary.hr }} bpm{% endif %}">
-        {% for g in t.hr_lines %}<div class="gl" data-pos="bottom:{{ '%.2f'|format(g.bottom) }}%"><span>{{ g.label }}</span></div>{% endfor %}
+    {% set c = t.steps %}
+    <div class="hchart" data-metric="steps">
+      <div class="chead"><h3>Steps</h3><p class="cval">{{ value(c.value, 'steps') }}</p></div>
+      <p class="small muted tsub">{% if c.bars %}{{ c.sub or 'No steps recorded' }}{% else %}Garmin only shares the day’s total for steps.{% endif %}</p>
+      <div class="plot tplot" role="img" aria-label="Steps through the day{% if c.value %}, {{ c.value }} in all{% endif %}">
+        {% if c.bars %}{% for g in c.lines %}<div class="gl" data-pos="bottom:{{ '%.2f'|format(g.bottom) }}%"><span>{{ g.label }}</span></div>{% endfor %}{% endif %}
         <div class="base"></div>
         {{ overlays() }}
-        <svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true"><path class="hr-band" d="{{ t.hr_band }}"/><path class="hr-line" d="{{ t.hr_line }}"/></svg>
+        {% if c.bars %}{{ bars(c.bars) }}{% else %}<p class="tnone"><span>Not available every 15 minutes</span></p>{% endif %}
       </div>
       {{ axis() }}
     </div>
-    <div class="hchart">
-      <div class="chead"><h3>Body Battery</h3><p class="cval">{% if t.summary.bb %}{{ t.summary.bb }}{% else %}<span class="muted no-reading">No readings</span>{% endif %}</p></div>
-      {% if t.summary.bb_range %}<p class="small muted tsub">{{ t.summary.bb_range }}</p>{% endif %}
-      <div class="plot tplot" role="img" aria-label="Body Battery through the day{% if t.summary.bb %}, {{ t.summary.bb }}{% endif %}">
+    {% set c = t.hr %}
+    <div class="hchart" data-metric="hr">
+      <div class="chead"><h3>Heart rate</h3><p class="cval">{{ value(c.value, 'bpm') }}</p></div>
+      <p class="small muted tsub">{{ c.sub or 'No heart rate readings' }}</p>
+      <div class="plot tplot" role="img" aria-label="Heart rate through the day{% if c.value %}, {{ c.value }} bpm{% endif %}">
+        {% for g in c.lines %}<div class="gl" data-pos="bottom:{{ '%.2f'|format(g.bottom) }}%"><span>{{ g.label }}</span></div>{% endfor %}
+        {% if c.resting %}<div class="avgl rest-line" data-pos="bottom:{{ '%.2f'|format(c.resting.bottom) }}%"><span>{{ c.resting.label }}</span></div>{% endif %}
+        <div class="base"></div>
+        {{ overlays() }}
+        <svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true"><path class="hr-band" d="{{ c.band }}"/><path class="hr-line" d="{{ c.line }}"/></svg>
+      </div>
+      {{ axis() }}
+    </div>
+    {% set c = t.stress %}
+    <div class="hchart" data-metric="stress">
+      <div class="chead"><h3>Stress</h3><p class="cval">{{ value(c.value, 'avg') }}</p></div>
+      <p class="small muted tsub">{% if c.bars %}{{ c.sub }}{% elif c.periods %}{{ c.sub }}. Garmin only shares stress levels for the whole day.{% else %}Garmin only shares stress levels for the whole day.{% endif %}</p>
+      <div class="plot tplot" role="img" aria-label="Stress through the day{% if c.value is not none %}, average {{ c.value }}{% endif %}{% if c.sub %}, {{ c.sub }}{% endif %}">
+        <div class="gl" data-pos="bottom:75%"><span>75 high</span></div><div class="gl" data-pos="bottom:25%"><span>25 rest</span></div>
+        <div class="base"></div>
+        {% for pd in c.periods %}<span class="tperiod {{ pd.kind }}" data-pos="left:{{ '%.3f'|format(pd.left) }}%;width:{{ '%.3f'|format(pd.width) }}%" title="{{ pd.label }}"></span>{% endfor %}
+        {{ overlays() }}
+        {% if c.bars %}{{ bars(c.bars) }}{% elif not c.periods %}<p class="tnone"><span>Not available every 15 minutes</span></p>{% endif %}
+      </div>
+      {{ axis() }}
+    </div>
+    {% set c = t.bb %}
+    <div class="hchart" data-metric="bb">
+      <div class="chead"><h3>Body Battery</h3><p class="cval">{{ value(c.value, None) }}</p></div>
+      <p class="small muted tsub">{{ c.sub or 'No Body Battery readings' }}</p>
+      <div class="plot tplot" role="img" aria-label="Body Battery through the day{% if c.value %}, {{ c.value }}{% endif %}">
         <div class="gl" data-pos="bottom:100%"><span>100</span></div><div class="gl" data-pos="bottom:50%"><span>50</span></div>
         <div class="base"></div>
         {{ overlays() }}
-        <svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true"><path class="bb-area" d="{{ t.bb_area }}"/><path class="bb-line" d="{{ t.bb_line }}"/></svg>
+        <svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true"><path class="bb-area" d="{{ c.area }}"/><path class="bb-line" d="{{ c.line }}"/>{% if c.dots %}<path class="bb-dots" d="{{ c.dots }}"/>{% endif %}</svg>
       </div>
       {{ axis() }}
     </div>
-    {% if t.show_stress %}
-    <div class="hchart">
-      <div class="chead"><h3>Stress</h3><p class="cval">{% if t.summary.stress is not none %}{{ t.summary.stress }}<small> avg</small>{% elif t.summary.stress_periods %}{{ t.summary.stress_periods }}{% else %}<span class="muted no-reading">No periods</span>{% endif %}</p></div>
-      {% if t.summary.stress_peak %}<p class="small muted tsub">{{ t.summary.stress_peak }}{% if t.summary.stress_periods %} · {{ t.summary.stress_periods }}{% endif %}</p>
-      {% else %}<p class="small muted tsub">Shaded where Garmin says stress drained or rest recharged Body Battery. Garmin doesn’t share 15-minute stress levels for this day.</p>{% endif %}
-      <div class="plot tplot" role="img" aria-label="Stress through the day{% if t.summary.stress is not none %}, average {{ t.summary.stress }}{% endif %}{% if t.summary.stress_periods %}, {{ t.summary.stress_periods }}{% endif %}">
-        <div class="gl" data-pos="bottom:75%"><span>75 high</span></div><div class="gl" data-pos="bottom:25%"><span>25 rest</span></div>
-        <div class="base"></div>
-        {% for pd in t.periods %}<span class="tperiod {{ pd.kind }}" data-pos="left:{{ '%.3f'|format(pd.left) }}%;width:{{ '%.3f'|format(pd.width) }}%" title="{{ pd.label }}"></span>{% endfor %}
-        {{ overlays() }}
-        {% if t.stress_bars %}<svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true">{% for b in t.stress_bars %}<rect class="sbar {{ b.band }}" x="{{ b.x }}" y="{{ b.y }}" width="12" height="{{ b.h }}"/>{% endfor %}</svg>{% endif %}
-      </div>
-      {{ axis() }}
-    </div>
-    {% endif %}
   </div>
   <p class="small muted chart-key tkey">
-    <span class="key"><i class="key-hr"></i>Average, with the slot’s lowest–highest</span>
-    {% if t.spans %}<span class="key"><i class="key-span"></i>Workout</span>{% endif %}
-    {% if t.stress_bars %}<span class="key"><i class="key-stress"></i>Stress: rest 0–25, low, medium, high 76–100</span>{% endif %}
-    {% if t.periods|selectattr('kind', 'equalto', 'stress')|list %}<span class="key"><i class="key-stress-period"></i>Stress period</span>{% endif %}
-    {% if t.periods|selectattr('kind', 'equalto', 'recovery')|list %}<span class="key"><i class="key-recovery"></i>Recovery period</span>{% endif %}
+    {% if t.stress.bars %}<span class="key"><i class="key-stress"></i>Stress: rest 0–25, low, medium, high 76–100</span>{% endif %}
+    {% if t.stress.periods|selectattr('kind', 'equalto', 'stress')|list %}<span class="key"><i class="key-stress-period"></i>Stress period</span>{% endif %}
+    {% if t.stress.periods|selectattr('kind', 'equalto', 'recovery')|list %}<span class="key"><i class="key-recovery"></i>Recovery period</span>{% endif %}
+    {% if t.spans %}<span class="key"><i class="key-span"></i>Workout: {% for s in t.spans %}{{ s.label }}{{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
     {% if t.meals %}<span class="key"><i class="key-meal"></i>Meal: {% for m in t.meals %}{{ m.label }}{{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
   </p>
-  {% if t.periods %}<ul class="period-list small">{% for pd in t.periods %}<li><i class="{{ pd.kind }}" aria-hidden="true"></i>{{ pd.label }}</li>{% endfor %}</ul>{% endif %}
+  {% if t.stress.periods %}<ul class="period-list small">{% for pd in t.stress.periods %}<li><i class="{{ pd.kind }}" aria-hidden="true"></i>{{ pd.label }}</li>{% endfor %}</ul>{% endif %}
   <details class="slot-details">
     <summary>Every 15 minutes</summary>
     <div class="table-wrap">
       <table class="log-table slot-table">
-        <thead><tr><th scope="col">Time</th><th scope="col">Heart rate</th><th scope="col">Lowest–highest</th><th scope="col">Body Battery</th>{% if t.stress_bars %}<th scope="col">Stress</th><th scope="col">Highest</th>{% endif %}</tr></thead>
-        <tbody>{% for s in t.slots %}<tr><td>{{ s.time }}</td><td>{{ s.hr ~ ' bpm' if s.hr is defined else '–' }}</td><td>{{ s.hr_min ~ '–' ~ s.hr_max if s.hr_min is defined else '–' }}</td><td>{{ s.body_battery if s.body_battery is defined else '–' }}</td>{% if t.stress_bars %}<td>{{ s.stress if s.stress is defined else '–' }}</td><td>{{ s.stress_max if s.stress_max is defined else '–' }}</td>{% endif %}</tr>{% endfor %}</tbody>
+        <thead><tr><th scope="col">Time</th>{% if t.columns.steps %}<th scope="col">Steps</th>{% endif %}<th scope="col">Heart rate</th><th scope="col">Lowest–highest</th>{% if t.columns.stress %}<th scope="col">Stress</th>{% endif %}<th scope="col">Body Battery</th></tr></thead>
+        <tbody>{% for s in t.slots %}<tr><td>{{ s.time }}</td>{% if t.columns.steps %}<td>{{ '{:,}'.format(s.steps) if s.steps is defined else '–' }}</td>{% endif %}<td>{{ s.hr ~ ' bpm' if s.hr is defined else '–' }}</td><td>{{ s.hr_min ~ '–' ~ s.hr_max if s.hr_min is defined else '–' }}</td>{% if t.columns.stress %}<td>{{ s.stress ~ (' (peak ' ~ s.stress_max ~ ')' if s.stress_max is defined and s.stress_max > s.stress else '') if s.stress is defined else '–' }}</td>{% endif %}<td>{{ s.body_battery if s.body_battery is defined else '–' }}</td></tr>{% endfor %}</tbody>
       </table>
     </div>
   </details>

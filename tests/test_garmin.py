@@ -65,6 +65,12 @@ def stress_day(day):
             "stressValuesArray": values}
 
 
+def steps_day(day):
+    # Garmin's 15-minute buckets in UTC: 06:00-06:15 local has 100 steps, 06:15 200 ... 07:45 800.
+    return [{"startGMT": gmt(day, 6 + i // 4, (i % 4) * 15), "endGMT": gmt(day, 6 + (i + 1) // 4, ((i + 1) % 4) * 15),
+             "steps": 100 * (i + 1), "primaryActivityLevel": "active"} for i in range(8)]
+
+
 def battery_day(day):
     values = [[local_ms(day, 6, m), "MEASURED", 70 - m // 3, 3] for m in range(0, 60, 3)]
     sydney = int(datetime.fromisoformat(f"{day}T12:00").replace(tzinfo=SYDNEY).utcoffset().total_seconds() * 1000)
@@ -91,6 +97,8 @@ class FakeGarmin:
         self.valid_key, self.issued, self.revoked, self.fail = KEY, [], set(), None
         self.activities, self.calls, self.wrapped_sleep, self.empty_days = None, [], True, set()
         self.serves_stress = False  # dailyStress isn't in the Personal API's published list
+        self.serves_steps = False   # nor is the 15-minute steps chart
+        self.chunks_unreadable = False  # Body Battery with chunks=96 answers in a shape the parser can't read
 
     def exchange(self, api_key):
         if api_key != self.valid_key:
@@ -118,12 +126,19 @@ class FakeGarmin:
             raise ApiError(404)
         if path.startswith("/wellness-service/wellness/dailyStress/") and self.serves_stress:
             return stress_day(path.rsplit("/", 1)[1])
+        if path == "/userprofile-service/userprofile/settings":
+            return {"displayName": "watch-owner", "id": 1}
+        if path == "/wellness-service/wellness/dailySummaryChart/watch-owner" and self.serves_steps:
+            return steps_day(params["date"])
         if path == "/wellness-service/wellness/dailyHeartRate":
             return heart_day(params["date"])
         if path == "/wellness-service/wellness/bodyBattery/reports/daily":
             first, last = date.fromisoformat(params["startDate"]), date.fromisoformat(params["endDate"])
             assert (last - first).days < 31
-            return [battery_day((first + timedelta(days=n)).isoformat()) for n in range((last - first).days + 1)]
+            reports = [battery_day((first + timedelta(days=n)).isoformat()) for n in range((last - first).days + 1)]
+            if "chunks" in params and self.chunks_unreadable:
+                reports = [{**r, "bodyBatteryValuesArray": [["low", "high"]], "bodyBatteryValueDescriptorDTOList": []} for r in reports]
+            return reports
         if path == "/activitylist-service/activities/search/activities":
             if self.activities is not None:
                 return self.activities[params["start"]:params["start"] + params["limit"]]
@@ -398,20 +413,32 @@ def test_timeline_folds_readings_into_15_minute_local_slots():
     assert build_timeline(date.fromisoformat(day), tokyo, None, SYDNEY) == [{"time": "12:00", "hr": 70, "hr_min": 70, "hr_max": 70}]
 
 
-def test_timeline_is_synced_shown_and_served_to_claude(client, app, account):
+def test_one_day_shows_every_metric_every_15_minutes_and_longer_periods_day_by_day(client, app, account):
     client.post("/api/garmin/key", json={"api_key": KEY})
     day = today() - timedelta(days=1)
     client.put(f"/api/days/{day}/meals/breakfast", json={"time": "06:40", "food": "Oats", "symptom_status": "none",
                                                           "symptoms": "", "expected_version": 0})
     assert client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)}).json()["warnings"] == []
-    page = client.get(f"/health?period=7&day={day}").text
-    assert "Through the day" in page and "Peak 119 bpm at 07:45" in page and "66 → 51" in page
+    page = client.get(f"/health?start={day}&end={day}").text
+    assert "Through the day" in page and "Day by day" not in page and 'id="log-heading"' not in page
+    assert ">The day</h2>" in page and "<dt>Steps</dt><dd>11,234</dd><span>Goal 10,000</span>" in page
+    assert "<dd>49<small> bpm</small></dd><span>Range 45–171 bpm</span>" in page and "<span>Peak 92</span>" in page
+    assert [m for m in ("steps", "hr", "stress", "bb") if f'data-metric="{m}"' in page] == ["steps", "hr", "stress", "bb"]
+    assert "Peak 119 bpm at 07:45 · average 90" in page and "resting 49" in page and "66 → 51" in page
+    # Steps and stress levels aren't shared by this account: the day's figures show, with a note.
+    assert "11,234<small> steps" in page and "Garmin only shares the day’s total for steps." in page
+    assert "1 stress period, 0h 55m. Garmin only shares stress levels for the whole day." in page
     assert 'title="Breakfast 06:40"' in page and 'title="Morning Run, 06:15–06:46"' in page
     assert "<td>06:15</td><td>71 bpm</td><td>68–74</td><td>61</td>" in page
-    # Picking another day swaps in that day's section only.
-    fragment = client.get(f"/health/timeline?day={day - timedelta(days=3)}").text
-    assert fragment.startswith("{#") is False and 'id="timeline"' in fragment and "No 15-minute readings" in fragment
-    assert "<html" not in fragment
+    # Longer periods chart day by day, and each day links to its 15-minute view.
+    week = client.get("/health?period=7").text
+    assert "Day by day" in week and 'id="timeline"' not in week and 'id="sheet-detail"' in week and 'id="log-heading"' in week
+    # A day synced before 15-minute data existed asks for a sync.
+    from app.models import HealthTimeline
+    with app.state.sessions.begin() as db:
+        db.query(HealthTimeline).delete()
+    assert "No 15-minute readings for this day yet. Sync to bring them in." in client.get(f"/health?start={day}&end={day}").text
+    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
     # Claude reads the slots, optionally only a window such as the hour after breakfast.
     token = client.post("/oauth/token", data=oauth_grant(client)).json()["access_token"]
     headers = {"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}
@@ -427,25 +454,60 @@ def test_timeline_is_synced_shown_and_served_to_claude(client, app, account):
     assert call(day=str(day), start_time="6pm")["isError"]
     missing = call(day=str(day - timedelta(days=3)))
     assert not (missing.get("structuredContent") or json.loads(missing["content"][0]["text"]))["available"]
-    client.post("/logout", data={"csrf": client.headers["X-CSRF-Token"]})
-    assert client.get(f"/health/timeline?day={day}").status_code == 401
 
 
-def test_timeline_view_breaks_lines_at_gaps():
+def test_steps_every_15_minutes_when_garmin_serves_them(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    day = today() - timedelta(days=1)
+    chart_calls = lambda: [c[0] for c in account.calls if "dailySummaryChart" in c[0]]
+    # Refused: both forms of the request are tried once, then never again.
+    client.post("/api/garmin/sync", json={"days": 3})
+    assert app.state.garmin.details["steps"] is False and len(chart_calls()) == 2
+    # Served (with the display name from the profile): steps land in the slots and the chart.
+    app.state.garmin.details.pop("steps"); account.serves_steps = True; account.calls.clear()
+    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
+    assert chart_calls() == ["/wellness-service/wellness/dailySummaryChart/watch-owner"]
+    page = client.get(f"/health?start={day}&end={day}").text
+    assert 'class="sbar steps"' in page and "Busiest 15 minutes 800 at 07:45" in page
+    assert "<td>06:15</td><td>200</td><td>71 bpm</td>" in page
+
+
+def test_body_battery_asks_for_15_minute_values_and_falls_back(client, app, account):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    day = today() - timedelta(days=1)
+    battery_calls = lambda: [c[1] for c in account.calls if c[0].endswith("bodyBattery/reports/daily")]
+    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
+    assert battery_calls()[0]["chunks"] == 96 and app.state.garmin.battery_chunks is True
+    # An unreadable answer to the 15-minute request falls back to the plain report, and isn't asked again.
+    app.state.garmin.battery_chunks, account.chunks_unreadable = None, True
+    account.calls.clear()
+    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
+    assert ["chunks" in c for c in battery_calls()] == [True, False] and app.state.garmin.battery_chunks is False
+    assert "66 → 51" in client.get(f"/health?start={day}&end={day}").text
+
+
+def test_timeline_view_model():
     from app import health_view
-    slots = [{"time": "06:00", "hr": 60, "hr_min": 55, "hr_max": 70, "body_battery": 80},
-             {"time": "06:15", "hr": 62, "hr_min": 58, "hr_max": 66},
-             {"time": "09:00", "hr": 90, "hr_min": 90, "hr_max": 90, "body_battery": 70}]
-    v = health_view.timeline(date(2026, 11, 19), slots, [], {"lunch": {"time": "12:30"}, "snack": {"time": None}})
-    assert v["hr_line"].count("M") == 2 and v["hr_band"].count("Z") == 2 and v["bb_line"].count("M") == 2
-    assert v["summary"]["hr"] == "55–90" and v["summary"]["bb"] == "80 → 70"
-    assert v["summary"]["bb_range"] == "High 80 at 06:00 · low 70 at 09:00" and v["hr_lo"] == 50 and v["hr_hi"] == 100
+    slots = [{"time": "06:00", "hr": 60, "hr_min": 55, "hr_max": 70, "body_battery": 80, "steps": 400},
+             {"time": "06:15", "hr": 62, "hr_min": 58, "hr_max": 66, "steps": 1200},
+             {"time": "09:00", "hr": 90, "hr_min": 90, "hr_max": 90, "body_battery": 70},
+             {"time": "14:00", "body_battery": 40}]
+    summary = {"steps": {"total": 5016}, "heart_rate": {"resting": 52}, "stress": {"average": 20}}
+    v = health_view.timeline(date(2026, 11, 19), slots, [], {"lunch": {"time": "12:30"}, "snack": {"time": None}}, (), summary)
+    assert v["hr"]["line"].count("M") == 2 and v["hr"]["band"].count("Z") == 2 and v["hr"]["value"] == "55–90"
+    assert v["hr"]["resting"]["label"] == "resting 52"
+    # Body Battery joins readings up to 3 hours apart; 09:00 to 14:00 is too far, so 14:00 is a dot.
+    assert v["bb"]["line"].count("M") == 1 and v["bb"]["dots"].count("M") == 1 and v["bb"]["value"] == "80 → 40"
+    assert v["bb"]["sub"] == "High 80 at 06:00 · low 40 at 14:00"
+    assert v["steps"]["value"] == "5,016" and v["steps"]["sub"] == "Busiest 15 minutes 1,200 at 06:15" and len(v["steps"]["bars"]) == 2
+    assert v["stress"]["value"] == 20 and not v["stress"]["bars"]  # the day's average when there are no slots
+    assert v["columns"] == {"steps": True, "stress": False}
     assert [m["label"] for m in v["meals"]] == ["Lunch 12:30"]
     assert not health_view.timeline(date(2026, 11, 19), [], [], {})["has_data"]
     with_stress = health_view.timeline(date(2026, 11, 19), [{"time": "14:00", "stress": 80, "stress_max": 90}], [], {},
                                        [{"type": "stress", "start": "14:00", "end": "15:30"}, {"type": "sleep", "start": "00:00", "end": "06:00"}])
-    assert [b["band"] for b in with_stress["stress_bars"]] == ["high"] and [p["kind"] for p in with_stress["periods"]] == ["stress"]
-    assert with_stress["summary"]["stress_periods"] == "1 stress period, 1h 30m" and with_stress["summary"]["stress_peak"] == "Peak 90 at 14:00"
+    assert [b["band"] for b in with_stress["stress"]["bars"]] == ["high"] and [p["kind"] for p in with_stress["stress"]["periods"]] == ["stress"]
+    assert with_stress["stress"]["sub"] == "Peak 90 at 14:00 · 1 stress period, 1h 30m"
     assert [health_view.stress_band(v) for v in (0, 25, 26, 51, 76)] == ["rest", "rest", "low", "medium", "high"]
 
 
@@ -469,17 +531,17 @@ def test_stress_detail_is_tried_once_and_used_when_garmin_serves_it(client, app,
     stress_calls = lambda: [c for c in account.calls if c[0].startswith("/wellness-service/wellness/dailyStress/")]
     # Not served: asked once, then left alone; the sync carries on and Body Battery events still show stress.
     assert client.post("/api/garmin/sync", json={"days": 3}).json()["warnings"] == []
-    assert len(stress_calls()) == 1 and app.state.garmin.stress_supported is False
-    page = client.get(f"/health?period=7&day={day}").text
-    assert "1 stress period, 0h 55m" in page and "Garmin doesn’t share 15-minute stress levels" in page
-    assert 'title="Stress, 14:10–15:05, Body Battery −6"' in page and "<th scope=\"col\">Highest</th>" not in page
+    assert len(stress_calls()) == 1 and app.state.garmin.details["stress"] is False
+    page = client.get(f"/health?start={day}&end={day}").text
+    assert "1 stress period, 0h 55m" in page and "Garmin only shares stress levels for the whole day" in page
+    assert 'title="Stress, 14:10–15:05, Body Battery −6"' in page and "<th scope=\"col\">Stress</th>" not in page.split("slot-table")[1]
     # Served: levels land in the slots, the chart and Claude's timeline.
-    app.state.garmin.stress_supported, account.serves_stress = None, True
+    app.state.garmin.details.pop("stress"); account.serves_stress = True
     client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
-    assert app.state.garmin.stress_supported is True
-    page = client.get(f"/health?period=7&day={day}").text
+    assert app.state.garmin.details["stress"] == 0
+    page = client.get(f"/health?start={day}&end={day}").text
     assert "Peak 77 at 14:45 · 1 stress period, 0h 55m" in page and 'class="sbar medium"' in page and 'class="sbar low"' in page
-    assert "<td>14:00</td><td>–</td><td>–</td><td>–</td><td>26</td><td>32</td>" in page
+    assert "<td>14:00</td><td>–</td><td>–</td><td>26 (peak 32)</td><td>–</td>" in page
     with app.state.sessions() as db:
         timeline = __import__("app.garmin", fromlist=["x"]).health_timeline(db, day, "14:00", "14:30")
     assert [s["stress"] for s in timeline["slots"]] == [26, 41, 56]
@@ -487,4 +549,4 @@ def test_stress_detail_is_tried_once_and_used_when_garmin_serves_it(client, app,
     # A day without stress readings once it has worked doesn't switch it off.
     account.serves_stress = False
     client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
-    assert app.state.garmin.stress_supported is True
+    assert app.state.garmin.details["stress"] == 0

@@ -172,22 +172,16 @@ def create_app(settings=None, garmin_http=None):
             view = health_view.build(garmin.health_range(db, first, last), first, last, today())
             if day and first <= day <= last:
                 view["selected"] = (day - first).days
-            tl = timeline_view(db, view["days"][view["selected"]]["date"])
+            # One day shows every 15 minutes; longer periods show day by day.
+            tl = timeline_view(db, first, view["days"][0]["summary"]) if view["n"] == 1 else None
         status = link.status()
         return templates.TemplateResponse(request, "health.html", context(request, view=view, period=key, section="health",
             garmin=status, garmin_connected=status["connected"], tl=tl, limited="limiting" in (status["last_error"] or "")))
 
-    def timeline_view(db, day):
+    def timeline_view(db, day, summary):
         stored = garmin.health_timeline(db, day)
         return health_view.timeline(day, stored["slots"], garmin.activities_between(db, day, day),
-                                    diary.get_day(db, day)["meals"], stored["events"])
-
-    @app.get("/health/timeline", dependencies=[Depends(security.require_user)])
-    def health_timeline_fragment(request: Request, day: date):
-        """The 'Through the day' section alone, so the Health page can switch days without reloading."""
-        with sessions() as db:
-            tl = timeline_view(db, day)
-        return templates.TemplateResponse(request, "_timeline.html", {"tl": tl, "garmin_connected": link.connected()})
+                                    diary.get_day(db, day)["meals"], stored["events"], summary)
 
     @app.get("/settings")
     def settings_page(request: Request):

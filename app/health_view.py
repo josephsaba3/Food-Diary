@@ -126,6 +126,23 @@ def build(health_days, start, end, today):
         "bb": fmt(mean("bb_high")) if mean("bb_high") is not None else None,
         "bb_low": f"{min(lows)} at its low" if lows else None,
     }
+    # Tile headings and second lines: a period's averages, or a single day's own figures.
+    if n == 1 and worn:
+        s = worn[0]["summary"]
+        hr, stress, bb, st = (s.get(k) or {} for k in ("heart_rate", "stress", "body_battery", "steps"))
+        averages.update(
+            heading="The day", steps_label="Steps", rhr=str(worn[0]["rhr"]),
+            steps_sub=f"Goal {fmt(st['goal'])}" if st.get("goal") else None,
+            rhr_sub=f"Range {hr['min']}–{hr['max']} bpm" if hr.get("min") is not None and hr.get("max") is not None else None,
+            stress_sub=f"Peak {stress['max']}" if stress.get("max") is not None else None,
+            bb_sub=f"Low {bb['lowest']}" if bb.get("lowest") is not None else None)
+    else:
+        averages.update(
+            heading="Averages", steps_label="Steps per day",
+            steps_sub=f"Best {averages['steps_best']}" if averages["steps_best"] else None,
+            rhr_sub=f"Range {averages['rhr_range']}" if averages["rhr_range"] else None,
+            stress_sub=f"Highest day {averages['stress_peak']}" if averages["stress_peak"] else None,
+            bb_sub=f"Lowest {averages['bb_low']}" if averages["bb_low"] else None)
 
     # Selection defaults to the most recent worn day.
     selected = max((i for i, x in enumerate(days) if x["worn"]), default=n - 1)
@@ -207,9 +224,16 @@ def build(health_days, start, end, today):
             "charts": charts, "rows": rows, "log_preview": LOG_PREVIEW, "client": client}
 
 
-# ---- through the day ------------------------------------------------------------
+# ---- through the day (a single day in 15-minute slots) ------------------------
 
 DAY_MINUTES = 1440
+JOIN_BODY_BATTERY = 180  # Body Battery is a level, so readings up to 3 hours apart are joined by the line
+STRESS_BANDS = ((25, "rest"), (50, "low"), (75, "medium"), (100, "high"))  # Garmin's own stress ranges
+EVENT_NAMES = {"stress": "Stress", "recovery": "Recovery"}
+
+
+def stress_band(level):
+    return next(name for top, name in STRESS_BANDS if level <= top)
 
 
 def _clock(minutes):
@@ -224,11 +248,11 @@ def _minutes(hhmm):
         return None
 
 
-def _runs(points):
-    """Split (slot minute, ...) points into runs of back-to-back slots so gaps in wear stay gaps."""
+def _runs(points, join=15):
+    """Split (slot minute, ...) points into runs, breaking where readings are more than `join` minutes apart."""
     runs, current, last = [], [], None
     for point in points:
-        if last is not None and point[0] - last > 15:
+        if last is not None and point[0] - last > join:
             runs.append(current)
             current = []
         current.append(point)
@@ -238,74 +262,73 @@ def _runs(points):
     return runs
 
 
-STRESS_BANDS = ((25, "rest"), (50, "low"), (75, "medium"), (100, "high"))  # Garmin's own stress ranges
-EVENT_NAMES = {"stress": "Stress", "recovery": "Recovery"}
+def _x(minute):
+    return minute + 7.5  # centre of the 15-minute slot, in a 0-1440 viewBox
 
 
-def stress_band(level):
-    return next(name for top, name in STRESS_BANDS if level <= top)
+def _bars(points, top):
+    """SVG bars for (minute, value) points on a 0-top scale."""
+    return [{"x": m + 1.5, "y": 100 - pct(v, 0, top), "h": max(pct(v, 0, top), 1.5), "value": v, "minute": m}
+            for m, v in points]
 
 
-def timeline(day, slots, activities=(), meals=None, events=()):
-    """Geometry for the 15-minute heart rate, Body Battery and stress charts of one day (SVG viewBox 0 0 1440 100)."""
-    def x(minute):
-        return minute + 7.5  # centre of the 15-minute slot
+def _nice_top(peak, step):
+    return max(step * 2, math.ceil(peak * 1.05 / step) * step)
 
+
+def timeline(day, slots, activities=(), meals=None, events=(), summary=None):
+    """The single-day view: steps, heart rate, stress and Body Battery in 15-minute slots (SVG viewBox 0 0 1440 100).
+
+    summary is the day's Garmin summary, used for totals and when a metric isn't available slot by slot.
+    """
+    summary = summary or {}
     rows = [(_minutes(s["time"]), s) for s in slots if _minutes(s.get("time")) is not None]
+    pick = lambda key: [(m, s[key]) for m, s in rows if s.get(key) is not None]
+    steps, battery, stress = pick("steps"), pick("body_battery"), pick("stress")
     heart = [(m, s["hr"], s.get("hr_min", s["hr"]), s.get("hr_max", s["hr"])) for m, s in rows if s.get("hr") is not None]
-    battery = [(m, s["body_battery"]) for m, s in rows if s.get("body_battery") is not None]
 
-    hr_lo = hr_hi = None
-    hr_band = hr_line = ""
-    hr_lines = []
+    # Steps ------------------------------------------------------------------
+    day_steps = (summary.get("steps") or {}).get("total")
+    steps_top = _nice_top(max(v for _, v in steps), 250) if steps else 500
+    busiest = max(steps, key=lambda p: p[1]) if steps else None
+    steps_chart = {
+        "bars": _bars(steps, steps_top),
+        "lines": [{"bottom": 50.0, "label": f"{steps_top // 2:,}"}, {"bottom": 100.0, "label": f"{steps_top:,}"}],
+        "value": f"{day_steps:,}" if day_steps is not None else (f"{sum(v for _, v in steps):,}" if steps else None),
+        "sub": f"Busiest 15 minutes {busiest[1]:,} at {_clock(busiest[0])}" if busiest and busiest[1] else None,
+    }
+
+    # Heart rate ---------------------------------------------------------------
+    resting = (summary.get("heart_rate") or {}).get("resting")
+    hr_chart = {"band": "", "line": "", "lines": [], "resting": None, "value": None, "sub": None}
     if heart:
-        hr_lo = max(0, math.floor((min(h[2] for h in heart) - 5) / 10) * 10)
-        hr_hi = math.ceil((max(h[3] for h in heart) + 5) / 10) * 10
-        y = lambda v: 100 - pct(v, hr_lo, hr_hi)
+        lows = [h[2] for h in heart] + ([resting] if resting else [])
+        lo = max(0, math.floor((min(lows) - 5) / 10) * 10)
+        hi = math.ceil((max(h[3] for h in heart) + 5) / 10) * 10
+        y = lambda v: 100 - pct(v, lo, hi)
         band, line = [], []
         for run in _runs(heart):
-            top = [f"{x(m):.1f} {y(hi):.1f}" for m, _, _, hi in run]
-            bottom = [f"{x(m):.1f} {y(lo):.1f}" for m, _, lo, _ in reversed(run)]
             if len(run) == 1:  # a lone slot still needs width to be seen
-                m, _, lo, hi = run[0]
-                top = [f"{m + 2:.1f} {y(hi):.1f}", f"{m + 13:.1f} {y(hi):.1f}"]
-                bottom = [f"{m + 13:.1f} {y(lo):.1f}", f"{m + 2:.1f} {y(lo):.1f}"]
+                m, _, low, high = run[0]
+                top = [f"{m + 2:.1f} {y(high):.1f}", f"{m + 13:.1f} {y(high):.1f}"]
+                bottom = [f"{m + 13:.1f} {y(low):.1f}", f"{m + 2:.1f} {y(low):.1f}"]
+            else:
+                top = [f"{_x(m):.1f} {y(high):.1f}" for m, _, _, high in run]
+                bottom = [f"{_x(m):.1f} {y(low):.1f}" for m, _, low, _ in reversed(run)]
             band.append("M" + " L".join(top + bottom) + " Z")
-            line.append("M" + " L".join(f"{x(m):.1f} {y(avg):.1f}" for m, avg, _, _ in run))
-        hr_band, hr_line = " ".join(band), " ".join(line)
-        step = 20 if hr_hi - hr_lo > 60 else 10
-        hr_lines = [{"bottom": pct(v, hr_lo, hr_hi), "label": str(v)}
-                    for v in range(hr_lo + step, hr_hi, step)]
+            line.append("M" + " L".join(f"{_x(m):.1f} {y(avg):.1f}" for m, avg, _, _ in run))
+        step = 20 if hi - lo > 60 else 10
+        peak = max(heart, key=lambda h: h[3])
+        average = round(sum(h[1] for h in heart) / len(heart))
+        hr_chart.update(band=" ".join(band), line=" ".join(line),
+                        lines=[{"bottom": pct(v, lo, hi), "label": str(v)} for v in range(lo + step, hi, step)],
+                        resting={"bottom": pct(resting, lo, hi), "label": f"resting {resting}"} if resting else None,
+                        value=f"{min(h[2] for h in heart)}–{max(h[3] for h in heart)}",
+                        sub=f"Peak {peak[3]} bpm at {_clock(peak[0])} · average {average}")
 
-    bb_line = bb_area = ""
-    if battery:
-        y = lambda v: 100 - v
-        line, area = [], []
-        for run in _runs(battery):
-            points = [f"{x(m):.1f} {y(v):.1f}" for m, v in run]
-            if len(run) == 1:
-                m, v = run[0]
-                points = [f"{m + 2:.1f} {y(v):.1f}", f"{m + 13:.1f} {y(v):.1f}"]
-            line.append("M" + " L".join(points))
-            first, last = points[0].split()[0], points[-1].split()[0]
-            area.append(f"M{first} 100 L" + " L".join(points) + f" L{last} 100 Z")
-        bb_line, bb_area = " ".join(line), " ".join(area)
-
-    spans = []
-    for a in activities or ():
-        start = _minutes((a.get("start") or "")[11:16])
-        if start is None or not (a.get("start") or "").startswith(day.isoformat()):
-            continue
-        length = max(5, round(a.get("duration_minutes") or 0))
-        end = min(DAY_MINUTES, start + length)
-        name = a.get("name") or (a.get("type") or "workout").replace("_", " ").capitalize()
-        spans.append({"left": start / DAY_MINUTES * 100, "width": max(0.4, (end - start) / DAY_MINUTES * 100),
-                      "label": f"{name}, {_clock(start)}–{_clock(end % DAY_MINUTES)}"})
-
-    stress = [(m, s["stress"], s.get("stress_max", s["stress"])) for m, s in rows if s.get("stress") is not None]
-    stress_bars = [{"x": m + 1.5, "y": 100 - level, "h": max(level, 1.5), "band": stress_band(level),
-                    "label": f"{_clock(m)} stress {level}"} for m, level, _ in stress]
+    # Stress -----------------------------------------------------------------
     periods = []
+    stress_minutes = 0
     for e in events or ():
         start, end = _minutes(e.get("start")), _minutes(e.get("end"))
         if e.get("type") not in EVENT_NAMES or start is None or end is None or end <= start:
@@ -316,44 +339,65 @@ def timeline(day, slots, activities=(), meals=None, events=()):
             label += f", Body Battery {'+' if impact > 0 else '−' if impact < 0 else ''}{abs(impact)}"
         periods.append({"kind": e["type"], "left": start / DAY_MINUTES * 100,
                         "width": max(0.4, (end - start) / DAY_MINUTES * 100), "label": label})
-    stress_minutes = sum(_minutes(e["end"]) - _minutes(e["start"]) for e in events or ()
-                         if e.get("type") == "stress" and _minutes(e.get("start")) is not None and _minutes(e.get("end")) is not None)
+        if e["type"] == "stress":
+            stress_minutes += end - start
+    stress_count = sum(1 for p in periods if p["kind"] == "stress")
+    period_text = (f"{stress_count} stress {'period' if stress_count == 1 else 'periods'}, "
+                   f"{stress_minutes // 60}h {stress_minutes % 60:02d}m") if stress_count else None
+    stress_peak = max(((m, s.get("stress_max", s["stress"])) for m, s in rows if s.get("stress") is not None),
+                      key=lambda p: p[1], default=None)
+    day_stress = (summary.get("stress") or {}).get("average")
+    stress_bars = _bars(stress, 100)
+    for bar in stress_bars:
+        bar["band"] = stress_band(bar["value"])
+    stress_chart = {
+        "bars": stress_bars, "periods": periods,
+        # Garmin's own daily average, so it matches the figure above; the slots' average only if it's missing.
+        "value": day_stress if day_stress is not None else (round(sum(v for _, v in stress) / len(stress)) if stress else None),
+        "sub": " · ".join(t for t in (f"Peak {stress_peak[1]} at {_clock(stress_peak[0])}" if stress_peak else None,
+                                      period_text) if t) or None,
+    }
 
+    # Body Battery -----------------------------------------------------------
+    bb_chart = {"line": "", "area": "", "dots": [], "value": None, "sub": None}
+    if battery:
+        y = lambda v: 100 - v
+        line, area = [], []
+        for run in _runs(battery, JOIN_BODY_BATTERY):
+            if len(run) == 1:
+                m, v = run[0]
+                bb_chart["dots"].append(f"M{_x(m):.1f} {y(v):.1f} l0.01 0")
+                continue
+            points = [f"{_x(m):.1f} {y(v):.1f}" for m, v in run]
+            line.append("M" + " L".join(points))
+            area.append(f"M{_x(run[0][0]):.1f} 100 L" + " L".join(points) + f" L{_x(run[-1][0]):.1f} 100 Z")
+        high, low = max(battery, key=lambda b: b[1]), min(battery, key=lambda b: b[1])
+        bb_chart.update(line=" ".join(line), area=" ".join(area), dots=" ".join(bb_chart["dots"]),
+                        value=f"{battery[0][1]} → {battery[-1][1]}",
+                        sub=f"High {high[1]} at {_clock(high[0])} · low {low[1]} at {_clock(low[0])}")
+
+    # Workouts and meals, drawn on every chart -----------------------------------
+    spans = []
+    for a in activities or ():
+        start = _minutes((a.get("start") or "")[11:16])
+        if start is None or not (a.get("start") or "").startswith(day.isoformat()):
+            continue
+        end = min(DAY_MINUTES, start + max(5, round(a.get("duration_minutes") or 0)))
+        name = a.get("name") or (a.get("type") or "workout").replace("_", " ").capitalize()
+        spans.append({"left": start / DAY_MINUTES * 100, "width": max(0.4, (end - start) / DAY_MINUTES * 100),
+                      "label": f"{name}, {_clock(start)}–{_clock(end % DAY_MINUTES)}"})
     marks = []
     for category, meal in (meals or {}).items():
         at = _minutes(meal.get("time") or "")
         if at is not None:
-            marks.append({"left": (at + 0.5) / DAY_MINUTES * 100, "time": _clock(at),
-                          "label": f"{category.capitalize()} {_clock(at)}"})
+            marks.append({"left": (at + 0.5) / DAY_MINUTES * 100, "label": f"{category.capitalize()} {_clock(at)}"})
     marks.sort(key=lambda m: m["left"])
 
-    hr_values = [h[1] for h in heart]
-    peak = max(heart, key=lambda h: h[3]) if heart else None
-    summary = {
-        "hr": f"{min(h[2] for h in heart)}–{max(h[3] for h in heart)}" if heart else None,
-        "hr_peak": f"Peak {peak[3]} bpm at {_clock(peak[0])}" if peak else None,
-        "hr_avg": round(sum(hr_values) / len(hr_values)) if hr_values else None,
-        "bb": f"{battery[0][1]} → {battery[-1][1]}" if battery else None,
-        "bb_range": (lambda hi, lo: f"High {hi[1]} at {_clock(hi[0])} · low {lo[1]} at {_clock(lo[0])}")(
-            max(battery, key=lambda b: b[1]), min(battery, key=lambda b: b[1])) if battery else None,
-    }
-    stress_peak = max(stress, key=lambda st: st[2]) if stress else None
-    summary.update({
-        "stress": round(sum(st[1] for st in stress) / len(stress)) if stress else None,
-        "stress_peak": f"Peak {stress_peak[2]} at {_clock(stress_peak[0])}" if stress_peak else None,
-        "stress_periods": (f"{sum(1 for p in periods if p['kind'] == 'stress')} stress "
-                           f"{'period' if sum(1 for p in periods if p['kind'] == 'stress') == 1 else 'periods'}, "
-                           f"{stress_minutes // 60}h {stress_minutes % 60:02d}m") if stress_minutes else None,
-    })
     return {
         "iso": day.isoformat(), "long": long(day), "has_data": bool(slots) or bool(periods),
-        "stress_bars": stress_bars, "periods": periods,
-        "show_stress": bool(stress_bars or periods),
-        "slots": slots, "summary": summary,
-        "hr_band": hr_band, "hr_line": hr_line, "hr_lines": hr_lines,
-        "bb_line": bb_line, "bb_area": bb_area,
+        "slots": slots, "steps": steps_chart, "hr": hr_chart, "stress": stress_chart, "bb": bb_chart,
         "spans": spans, "meals": marks,
-        "axis": [{"left": h / 24 * 100, "text": f"{h:02d}:00" if h < 24 else "24:00",
-                  "align": "start" if h == 0 else "end" if h == 24 else "center"} for h in (0, 6, 12, 18, 24)],
-        "hr_lo": hr_lo, "hr_hi": hr_hi,
+        "columns": {"steps": bool(steps), "stress": bool(stress)},
+        "axis": [{"left": h / 24 * 100, "text": f"{h:02d}:00", "align": "start" if h == 0 else "end" if h == 24 else "center"}
+                 for h in (0, 6, 12, 18, 24)],
     }

@@ -34,7 +34,8 @@ REQUEST_GAP = float(os.getenv("GARMIN_REQUEST_GAP", "1"))    # seconds between r
 QUICK_GAP = 0.3        # ...and in a sync someone is waiting on
 BACKOFF = (60, 120, 240, 480, 900, 900)  # waits when Garmin says to slow down: about 45 minutes in all
 MAX_HISTORY_DAYS = 731 # Two years.
-SLOT_MINUTES = 15     # Heart rate and Body Battery are kept through the day in slots this long.
+SLOT_MINUTES = 15     # Heart rate, Body Battery, stress and steps are kept through the day in slots this long.
+TIMELINE_VERSION = 2  # Bump when timelines gain data, so downloads fetch older days again.
 
 
 class GarminError(RuntimeError):
@@ -300,11 +301,27 @@ def _number(value, low, high):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high else None
 
 
-def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None):
-    """Fold Garmin's heart rate, Body Battery and stress readings into 15-minute slots of the watch's local day.
+def battery_readings(report):
+    """(UTC moment, level) pairs from a Body Battery report, oldest first."""
+    readings = []
+    for row, named in value_rows(report, "bodyBatteryValuesArray", "bodyBatteryValueDescriptorDTOList",
+                                 "bodyBatteryValueDescriptorIndex", "bodyBatteryValueDescriptorKey"):
+        stamp = named.get("timestamp", row[0] if row else None)
+        if "bodyBatteryLevel" in named:
+            level = named["bodyBatteryLevel"]
+        else:  # undescribed rows are [timestamp, level] or [timestamp, status, level, version]
+            level = row[2] if len(row) >= 4 else row[1] if len(row) > 1 else None
+        level, moment = _number(level, 0, 100), utc_moment(stamp)
+        if level is not None and moment is not None:
+            readings.append((moment, level))
+    return sorted(readings)
 
-    Each slot has the average, lowest and highest heart rate, the last Body Battery reading and the average
-    and highest stress level (0-100; Garmin's negative 'no score' readings are skipped) in it.
+
+def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None, steps=None):
+    """Fold Garmin's heart rate, Body Battery, stress and step readings into 15-minute slots of the watch's local day.
+
+    Each slot has the average, lowest and highest heart rate, the last Body Battery reading, the average
+    and highest stress level (0-100; Garmin's negative 'no score' readings are skipped) and the steps in it.
     Slots with no readings are left out.
     """
     slots = {}
@@ -315,7 +332,7 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None):
         local = clock(moment)
         if local.date() != day:
             return None
-        return slots.setdefault((local.hour * 60 + local.minute) // SLOT_MINUTES, {"hr": [], "bb": [], "stress": []})
+        return slots.setdefault((local.hour * 60 + local.minute) // SLOT_MINUTES, {"hr": [], "bb": [], "stress": [], "steps": []})
 
     if isinstance(heart, dict):
         clock = local_clock(heart, tz)
@@ -327,18 +344,7 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None):
                 target["hr"].append(bpm)
     if isinstance(battery, dict):
         clock = local_clock(battery, tz)
-        readings = []
-        for row, named in value_rows(battery, "bodyBatteryValuesArray", "bodyBatteryValueDescriptorDTOList",
-                                     "bodyBatteryValueDescriptorIndex", "bodyBatteryValueDescriptorKey"):
-            stamp = named.get("timestamp", row[0] if row else None)
-            if "bodyBatteryLevel" in named:
-                level = named["bodyBatteryLevel"]
-            else:  # undescribed rows are [timestamp, level] or [timestamp, status, level, version]
-                level = row[2] if len(row) >= 4 else row[1] if len(row) > 1 else None
-            level, moment = _number(level, 0, 100), utc_moment(stamp)
-            if level is not None and moment is not None:
-                readings.append((moment, level))
-        for moment, level in sorted(readings):
+        for moment, level in battery_readings(battery):
             target = slot(moment, clock)
             if target is not None:
                 target["bb"].append(level)
@@ -350,11 +356,19 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None):
             target = slot(utc_moment(stamp), clock) if level is not None else None
             if target is not None:
                 target["stress"].append(level)
+    if isinstance(steps, list):
+        # 15-minute buckets with UTC start times only; the day's offset comes from the other responses.
+        clock = local_clock(heart if isinstance(heart, dict) else battery if isinstance(battery, dict) else {}, tz)
+        for bucket in steps:
+            count = _number((bucket or {}).get("steps") if isinstance(bucket, dict) else None, 0, 100000)
+            target = slot(utc_moment(bucket.get("startGMT")), clock) if count is not None else None
+            if target is not None:
+                target["steps"].append(count)
     out = []
     for index in sorted(slots):
-        hr, bb, levels = slots[index]["hr"], slots[index]["bb"], slots[index]["stress"]
-        if not hr and not bb and not levels:
-            continue
+        hr, bb, levels, counts = (slots[index][k] for k in ("hr", "bb", "stress", "steps"))
+        if not hr and not bb and not levels and not any(counts):
+            continue  # nothing recorded (zero steps alone means the watch wasn't moving, or wasn't worn)
         minutes = index * SLOT_MINUTES
         entry = {"time": f"{minutes // 60:02d}:{minutes % 60:02d}"}
         if hr:
@@ -363,6 +377,8 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None):
             entry["body_battery"] = round(bb[-1])
         if levels:
             entry.update(stress=round(sum(levels) / len(levels)), stress_max=round(max(levels)))
+        if counts:
+            entry["steps"] = round(sum(counts))
         out.append(entry)
     return out
 
@@ -456,7 +472,8 @@ class GarminLink:
         key = hashlib.sha256(b"food-diary/garmin-tokens/" + settings.session_secret.encode()).digest()
         self.fernet = Fernet(base64.urlsafe_b64encode(key))
         self.lock = threading.Lock()
-        self.stress_supported = None  # unknown until Garmin answers a dailyStress request
+        # Data Garmin keeps but doesn't list for the Personal API: kind -> working candidate, or False once refused.
+        self.details, self.profile_name, self.battery_chunks = {}, None, None
         # Request pacing. Background downloads space requests out and wait out Garmin's rate limit
         # ("patient"); a sync someone is waiting on uses a short gap and reports the limit at once.
         self.sleep, self.gap, self.patient, self.last_request = time.sleep, QUICK_GAP, False, 0.0
@@ -609,27 +626,74 @@ class GarminLink:
                 warnings.append(f"{label} unavailable (HTTP {error.status})")
             return None
 
-    def _stress_detail(self, iso):
-        """Stress levels through the day, if Garmin serves them to a Personal API key.
+    def _detail(self, kind, candidates, valid):
+        """Data Garmin keeps but doesn't list for the Personal API (stress and steps through the day).
 
-        dailyStress isn't in the Personal API's published list, so it is tried once per process; any refusal
-        (other than a network failure or rate limit) means stop asking. A day without readings after it has
-        worked is just an empty day.
+        Each candidate (path, params) is tried until one answers in the expected shape; that one is then used
+        for the rest of the process. If none does, the kind is switched off until restart, so it costs one
+        request per candidate. Network failures and rate limits still stop the sync as usual.
         """
-        if getattr(self, "stress_supported", None) is False:
+        state = self.details.get(kind)
+        if state is False:
             return None
-        try:
-            data = self._get(f"/wellness-service/wellness/dailyStress/{iso}", renew=False)
-        except ApiError as error:
-            if error.status in (0, 429):
-                raise
-            if not (self.stress_supported and error.status in (204, 404)):
-                self.stress_supported = False
-            return None
-        if isinstance(data, dict) and isinstance(data.get("stressValuesArray"), list):
-            self.stress_supported = True
-            return data
+        for index in ([state] if isinstance(state, int) else range(len(candidates))):
+            path, params = candidates[index]
+            try:
+                data = self._get(path, params, renew=False)
+            except ApiError as error:
+                if error.status in (0, 429):
+                    raise
+                if isinstance(state, int):
+                    return None  # it has worked before: this day just has nothing
+                continue
+            if valid(data):
+                self.details[kind] = index
+                return data
+            if isinstance(state, int):
+                return None
+        self.details[kind] = False
         return None
+
+    def _display_name(self):
+        if self.profile_name is None:
+            try:
+                settings = self._get("/userprofile-service/userprofile/settings")
+            except ApiError as error:
+                if error.status in (0, 429):
+                    raise
+                settings = None
+            self.profile_name = str((settings or {}).get("displayName") or "") if isinstance(settings, dict) else ""
+        return self.profile_name
+
+    def _stress_detail(self, iso):
+        return self._detail("stress", [(f"/wellness-service/wellness/dailyStress/{iso}", None)],
+                            lambda data: isinstance(data, dict) and isinstance(data.get("stressValuesArray"), list))
+
+    def _steps_detail(self, iso):
+        if self.details.get("steps") is False:
+            return None
+        name = self._display_name()
+        candidates = ([(f"/wellness-service/wellness/dailySummaryChart/{name}", {"date": iso})] if name else []) + \
+                     [("/wellness-service/wellness/dailySummaryChart", {"date": iso})]
+        return self._detail("steps", candidates, lambda data: isinstance(data, list))
+
+    def _battery_reports(self, warnings, start, end):
+        """Body Battery reports by date. Asks for the lowest and highest reading in each 15-minute interval
+        (chunks=96); if Garmin's answer to that has no readable readings, falls back to the plain report."""
+        params = {"startDate": start.isoformat(), "endDate": end.isoformat()}
+        path = "/wellness-service/wellness/bodyBattery/reports/daily"
+        reports = None
+        if self.battery_chunks is not False:
+            reports = self._optional(warnings, "Body Battery", path, {**params, "chunks": 1440 // SLOT_MINUTES})
+            listed = [r for r in reports or [] if isinstance(r, dict)]
+            if any(r.get("bodyBatteryValuesArray") for r in listed):
+                if any(battery_readings(r) for r in listed):
+                    self.battery_chunks = True
+                else:
+                    self.battery_chunks, reports = False, None
+        if reports is None:
+            reports = self._optional(warnings, "Body Battery", path, params)
+        return {str(r["date"])[:10]: r for r in reports or [] if isinstance(r, dict) and r.get("date")}
 
     def _sync(self, start, end, on_day=None, skip=frozenset()):
         warnings, synced, activities_synced, stopped, skipped = [], 0, None, None, 0
@@ -643,10 +707,7 @@ class GarminLink:
             piece = start
             while piece <= end:  # Garmin serves Body Battery reports for at most 31 days per request.
                 piece_end = min(end, piece + timedelta(days=30))
-                for report in self._optional(warnings, "Body Battery", "/wellness-service/wellness/bodyBattery/reports/daily",
-                                             {"startDate": piece.isoformat(), "endDate": piece_end.isoformat()}) or []:
-                    if isinstance(report, dict) and report.get("date"):
-                        battery_by_day[str(report["date"])[:10]] = report
+                battery_by_day.update(self._battery_reports(warnings, piece, piece_end))
                 piece = piece_end + timedelta(days=1)
             tz = self.zone()
             for offset in range((end - start).days + 1):
@@ -666,7 +727,8 @@ class GarminLink:
                     continue
                 heart = self._optional(warnings, f"{iso}: heart rate", "/wellness-service/wellness/dailyHeartRate", {"date": iso})
                 stress = self._stress_detail(iso)
-                slots = build_timeline(day, heart, battery_by_day.get(iso), tz, stress)
+                steps = self._steps_detail(iso)
+                slots = build_timeline(day, heart, battery_by_day.get(iso), tz, stress, steps)
                 events = battery_events(day, battery_by_day.get(iso), tz)
                 vo2 = vo2_by_day.get(iso)
                 summary = summarize_day(stats if isinstance(stats, dict) else None, sleep if isinstance(sleep, dict) else None,
@@ -677,7 +739,8 @@ class GarminLink:
                     db.merge(HealthDay(day=day, summary=json.dumps(summary), raw=json.dumps(raw), synced_at=utcnow()))
                     if slots or events:
                         db.merge(HealthTimeline(day=day, slots=json.dumps(slots, separators=(",", ":")),
-                                                events=json.dumps(events, separators=(",", ":")), synced_at=utcnow()))
+                                                events=json.dumps(events, separators=(",", ":")),
+                                                version=TIMELINE_VERSION, synced_at=utcnow()))
                     else:
                         db.execute(delete(HealthTimeline).where(HealthTimeline.day == day))
                 synced += 1
@@ -728,12 +791,13 @@ class GarminLink:
         return dict(self.job) if self.job else {"state": "idle"}
 
     def complete_days(self, start, end):
-        """Days already downloaded in full: synced after 06:00 the next morning, with their 15-minute timeline."""
+        """Days already downloaded in full: synced after 06:00 the next morning, with a current 15-minute timeline."""
         zone = self.zone()
         with self.sessions() as db:
             synced = dict(db.execute(select(HealthDay.day, HealthDay.synced_at)
                                      .where(HealthDay.day >= start, HealthDay.day <= end)).all())
-            timelines = set(db.scalars(select(HealthTimeline.day).where(HealthTimeline.day >= start, HealthTimeline.day <= end)))
+            timelines = set(db.scalars(select(HealthTimeline.day).where(HealthTimeline.day >= start, HealthTimeline.day <= end,
+                                                                        HealthTimeline.version >= TIMELINE_VERSION)))
         done = set()
         for day, at in synced.items():
             settled = datetime.combine(day + timedelta(days=1), datetime.min.time()).replace(hour=6, tzinfo=zone)
