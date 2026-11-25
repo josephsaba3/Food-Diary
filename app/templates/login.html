@@ -2,7 +2,8 @@
 {% block title %}Sign in · Food diary{% endblock %}
 {% block content %}
 <main id="main" class="auth-page">
-  <h1>Your daily diary.</h1>
+  <span class="auth-mark" aria-hidden="true">{{ icon('today', 26) }}</span>
+  <h1>Food diary</h1>
   <p class="lede">A little space for what you ate<br>and how you felt.</p>
   <form method="post" action="/login" class="auth-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -10,7 +11,7 @@
     <label for="password">Diary password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required autofocus {% if error %}aria-invalid="true" aria-describedby="login-error"{% endif %}>
     {% if error %}<p class="error" id="login-error" role="alert">{{ error }}</p>{% endif %}
-    <button class="button primary full" type="submit">Open my diary <span aria-hidden="true">→</span></button>
+    <button class="btn primary big full" type="submit">Open my diary</button>
   </form>
   <p class="muted small">Your meals. Your notes. Just for you.</p>
 </main>

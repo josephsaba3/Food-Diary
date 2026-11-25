@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Report · Food diary{% endblock %}
+{% block content %}
+{% set v = view %}
+<main id="main" class="page wide report">
+  <header class="page-head no-print">
+    <div><p class="eyebrow">For your dietitian</p><h1>Report</h1></div>
+  </header>
+  <div class="report-layout">
+    <form class="report-form no-print" method="get" action="/report" id="report-form">
+      <div class="field-group">
+        <span class="caps">Dates</span>
+        <div class="range-pick">
+          <label>From<input type="date" name="start" value="{{ v.start }}" max="{{ today }}"></label>
+          <label>To<input type="date" name="end" value="{{ v.end }}" max="{{ today }}"></label>
+        </div>
+        <div class="range-quick">
+          {% for days, label in ((7, 'Last 7 days'), (14, '14 days'), (28, '4 weeks')) %}<a class="pill" href="/report?start={{ today - days_ago[days] }}&amp;end={{ today }}{% for p in v.parts if p.key != 'meals' %}&amp;{{ p.key }}={{ 1 if p.on else 0 }}{% endfor %}" {% if v.span == days and v.end == today %}aria-pressed="true"{% endif %}>{{ label }}</a>{% endfor %}
+        </div>
+      </div>
+      <fieldset class="field-group">
+        <legend class="caps">Include</legend>
+        <div class="toggles">
+          {% for p in v.parts %}
+          <label class="toggle-row">
+            <span class="toggle-text"><b>{{ p.label }}</b><span>{{ p.sub }}</span></span>
+            {% if p.key == 'meals' %}<input type="checkbox" checked disabled><span class="switch" aria-hidden="true"></span>
+            {% else %}<input type="hidden" name="{{ p.key }}" value="0"><input type="checkbox" name="{{ p.key }}" value="1" {% if p.on %}checked{% endif %}><span class="switch" aria-hidden="true"></span>{% endif %}
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      <noscript><button class="btn" type="submit">Update preview</button></noscript>
+      {% if v.unrecorded %}
+      <p class="notice">{{ icon('info', 20) }}<span>{% if v.unrecorded == v.meal_count %}No symptoms are recorded for these dates.{% else %}{{ v.unrecorded }} of {{ v.meal_count }} meals have no symptoms recorded.{% endif %} They print as “not recorded” so nothing reads as symptom-free by mistake.</span></p>
+      {% endif %}
+    </form>
+
+    <section class="report-preview" aria-labelledby="preview-heading">
+      <span class="caps no-print" id="preview-heading">Preview</span>
+      <article class="report-doc">
+        <div class="doc-head"><b>Food &amp; symptom diary</b><span>{{ v.label }} · {{ v.meal_count }} {{ 'meal' if v.meal_count == 1 else 'meals' }}</span></div>
+        {% for d in v.days %}
+        <div class="doc-day">
+          <h3>{{ d.title }}</h3>
+          {% if d.meals %}
+          <table class="doc-table">
+            <thead><tr><th scope="col">Time</th><th scope="col">Food &amp; drink</th>{% if include.symptoms %}<th scope="col">Symptoms</th>{% endif %}</tr></thead>
+            <tbody>{% for m in d.meals %}<tr><td>{{ m.time }}</td><td><span class="slot">{{ m.slot }}</span>{{ m.food }}</td>{% if include.symptoms %}<td class="{{ 'unrecorded' if m.status == 'unrecorded' else '' }}">{{ m.symptoms }}</td>{% endif %}</tr>{% endfor %}</tbody>
+          </table>
+          {% endif %}
+          {% if d.note %}<p class="doc-extra"><b>Notes:</b> {{ d.note }}</p>{% endif %}
+          {% if d.watch %}<p class="doc-extra"><b>Watch:</b> {{ d.watch }}</p>{% endif %}
+        </div>
+        {% else %}
+        <p class="muted small">Nothing logged in these dates.</p>
+        {% endfor %}
+      </article>
+      <div class="report-actions no-print">
+        <button class="btn primary big" type="button" id="print-report" {% if not v.days %}disabled{% endif %}>{{ icon('print', 20) }}Print or save as PDF</button>
+        <p class="hint">Opens your device’s print menu, where you can save it as a PDF or share it.</p>
+      </div>
+    </section>
+  </div>
+</main>
+{% endblock %}

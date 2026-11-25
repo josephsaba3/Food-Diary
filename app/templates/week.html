@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}{{ view.title }} · Food diary{% endblock %}
+{% block content %}
+{% set v = view %}
+<main id="main" class="page week">
+  <header class="page-head">
+    <div><p class="eyebrow">{{ v.label }}</p><h1>{{ v.title }}</h1></div>
+    <nav class="head-actions" aria-label="Choose a week">
+      <a class="icon-btn" href="/week?end={{ v.prev }}" aria-label="Previous week">{{ icon('left') }}</a>
+      {% if v.next %}<a class="icon-btn" href="/week?end={{ v.next }}" aria-label="Next week">{{ icon('right') }}</a>{% else %}<span class="icon-btn faint" aria-hidden="true">{{ icon('right') }}</span>{% endif %}
+    </nav>
+  </header>
+
+  <section class="tiles two" aria-label="Week summary">
+    <div class="tile soft"><span class="tile-label">Meals logged</span><span class="tile-value">{{ v.meal_count }} <small>on {{ v.days_logged }} of 7 days</small></span></div>
+    <div class="tile amber"><span class="tile-label">Symptoms recorded</span><span class="tile-value">{{ v.recorded }} <small>of {{ v.meal_count }} {{ 'meal' if v.meal_count == 1 else 'meals' }}</small></span></div>
+  </section>
+
+  {% if v.unrecorded %}
+  <div class="nudge">
+    <p>{{ v.unrecorded }} {{ 'meal has' if v.unrecorded == 1 else 'meals have' }} no symptoms recorded. Blank reads as “not recorded”, not “none”, so filling them in helps your dietitian.</p>
+    <a class="btn amber" href="/?date={{ v.gap_day }}">Fill in {{ 'today' if v.gap_day == today else v.gap_day.strftime('%A') }}</a>
+  </div>
+  {% endif %}
+
+  <section class="week-grid" aria-label="Meals by day">
+    <div class="wk-head" aria-hidden="true"><span></span>{% for s in v.slots %}<span>{{ s }}</span>{% endfor %}<span></span></div>
+    {% for d in v.rows %}
+    <a class="wk-row" href="/?date={{ d.iso }}" aria-label="{{ d.name }} {{ d.short }}: {% for c in d.cells %}{{ c.label }}; {% endfor %}{% if d.note %}has notes{% endif %}">
+      <span class="wk-day{{ ' today' if d.name == 'Today' else '' }}"><b>{{ d.name }}</b><span>{{ d.short }}</span></span>
+      {% for c in d.cells %}<span class="wk-cell" title="{{ c.label }}"><span class="cell {{ c.state }}"></span></span>{% endfor %}
+      <span class="wk-note">{% if d.note %}{{ icon('note', 16) }}{% endif %}</span>
+    </a>
+    {% endfor %}
+    <div class="legend"><span><i class="cell logged"></i>Logged</span><span><i class="cell empty"></i>Empty</span><span><i class="cell symptom"></i>With symptoms</span><span>{{ icon('note', 14) }}Day notes</span></div>
+  </section>
+
+  <section aria-labelledby="eaten-heading">
+    <div class="section-title"><h2 id="eaten-heading">Most eaten</h2></div>
+    {% if v.foods %}
+    <div class="bars">
+      {% for f in v.foods %}<div class="bar-row"><span>{{ f.name }}</span><span class="bar-track" aria-hidden="true"><i data-pos="width:{{ f.width }}%"></i></span><b>{{ f.count }}</b></div>{% endfor %}
+    </div>
+    {% else %}<p class="empty-state">Foods you log more than once this week show here.</p>{% endif %}
+  </section>
+</main>
+{% endblock %}

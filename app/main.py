@@ -17,7 +17,7 @@ from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import diary, garmin, health_view
+from . import diary, garmin, health_view, pages
 from .config import Settings
 from .database import make_engine, session_factory
 from .importing import ImportBundle, import_bundle
@@ -47,6 +47,9 @@ def create_app(settings=None, garmin_http=None):
     templates.env.filters["hm"] = lambda minutes: f"{int(minutes) // 60}h {int(minutes) % 60:02d}m" if minutes is not None else ""
     templates.env.filters["localtime"] = lambda iso: datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.timezone)).strftime("%d %b, %-I:%M %p").lstrip("0") if iso else ""
     templates.env.filters["label"] = lambda value: str(value or "").replace("_", " ").capitalize()
+    templates.env.filters["clock"] = lambda iso: datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.timezone)).strftime("%H:%M") if iso else ""
+    templates.env.globals["timedelta_7"] = timedelta(days=7)
+    templates.env.globals["days_ago"] = {n: timedelta(days=n - 1) for n in (7, 14, 28)}
     mcp = build_mcp(settings, sessions, link)
     mcp_app = mcp.streamable_http_app()
 
@@ -150,6 +153,9 @@ def create_app(settings=None, garmin_http=None):
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
 
+    def now_local():
+        return datetime.now(ZoneInfo(settings.timezone))
+
     @app.get("/")
     def index(request: Request, date: date | None = None):
         if redirect := require_page(request):
@@ -158,10 +164,37 @@ def create_app(settings=None, garmin_http=None):
         with sessions() as db:
             data = diary.get_day(db, day)
             health = garmin.health_day(db, day)
-        return templates.TemplateResponse(request, "diary.html", context(request, data=data, day=day, health=health,
-            section="diary", timedelta_30=timedelta(days=29),
-            garmin_connected=link.connected(), previous=day - timedelta(days=1), following=day + timedelta(days=1),
-            categories=CATEGORIES))
+            slots = garmin.health_timeline(db, day)["slots"]
+            view = pages.today_view(db, day, today(), now_local().strftime("%H:%M"), data["meals"], health["summary"], slots)
+            sheet = {"day": day.isoformat(), "today": today().isoformat(), "now": now_local().strftime("%H:%M"),
+                     "slots": CATEGORIES, "meals": data["meals"], "note": data["note"],
+                     "suggestions": pages.suggestions(db, day, today()), "copies": pages.copy_choices(db, day)}
+        return templates.TemplateResponse(request, "today.html", context(request, data=data, day=day, view=view, sheet=sheet,
+            section="today", title=pages.day_label(day, today()) if day >= today() - timedelta(days=1) else f"{day:%A}",
+            date_label=pages.long_date(day), garmin_connected=link.connected()))
+
+    @app.get("/week")
+    def week_page(request: Request, end: date | None = None):
+        if redirect := require_page(request):
+            return redirect
+        last = min(end or today(), today())
+        with sessions() as db:
+            view = pages.week_view(db, last, today())
+        return templates.TemplateResponse(request, "week.html", context(request, view=view, section="week"))
+
+    @app.get("/report")
+    def report_page(request: Request, start: date | None = None, end: date | None = None, meals: int = 1,
+                    symptoms: int = 1, notes: int = 0, watch: int = 0):
+        if redirect := require_page(request):
+            return redirect
+        last = min(end or today(), today())
+        first = min(start or last - timedelta(days=6), last)
+        if (last - first).days > 92:
+            first = last - timedelta(days=92)
+        include = {"meals": True, "symptoms": bool(symptoms), "notes": bool(notes), "watch": bool(watch)}
+        with sessions() as db:
+            view = pages.report_view(db, first, last, include, garmin.health_range(db, first, last) if watch else [])
+        return templates.TemplateResponse(request, "report.html", context(request, view=view, include=include, section="report"))
 
     @app.get("/health")
     def health_page(request: Request, period: int | None = None, start: date | None = None, end: date | None = None,
@@ -181,15 +214,17 @@ def create_app(settings=None, garmin_http=None):
 
     def timeline_view(db, day, summary):
         stored = garmin.health_timeline(db, day)
-        return health_view.timeline(day, stored["slots"], garmin.activities_between(db, day, day),
-                                    diary.get_day(db, day)["meals"], stored["events"], summary)
+        now = now_local()
+        return health_view.day_chart(day, stored["slots"], garmin.activities_between(db, day, day),
+                                     diary.get_day(db, day)["meals"], stored["events"], summary,
+                                     now.hour * 60 + now.minute if day == now.date() else None, CATEGORIES)
 
     @app.get("/settings")
     def settings_page(request: Request):
         if redirect := require_page(request):
             return redirect
         return templates.TemplateResponse(request, "settings.html", context(request, mcp_url=oauth.resource,
-            export_start=today() - timedelta(days=30), garmin=link.status()))
+            export_start=today() - timedelta(days=30), garmin=link.status(), section="settings"))
 
     @app.get("/api/days/{day}", dependencies=[Depends(security.require_user)])
     def read_day(day: date):
