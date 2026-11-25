@@ -71,7 +71,9 @@ def build_mcp(settings, sessions, link):
 
     @server.tool(annotations=read)
     def get_garmin_status() -> dict:
-        """Whether a Garmin watch is linked, when it last synced, which days are cached, and any history download's progress."""
+        """Whether a Garmin watch is linked, when it last synced, which days are cached, any history download's progress,
+        and fifteen_minute_data: what Garmin answered when steps, stress levels and Body Battery every 15 minutes were
+        first requested since the server started (available or not, with the HTTP status or answer shape)."""
         return link.status()
 
     @server.tool(annotations=fetch)

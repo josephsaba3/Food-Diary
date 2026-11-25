@@ -463,6 +463,34 @@ def health_timeline(session, day, start=None, end=None):
             "synced_at": row.synced_at.isoformat() if row else None,
             "interval_minutes": SLOT_MINUTES, "slots": slots, "events": events}
 
+# ---- describing Garmin's answers (for the diagnostics in the Garmin status) --------
+
+def _keys(value):
+    if isinstance(value, dict):
+        names = [f"{k}[{len(v)}]" if isinstance(v, list) else str(k) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))]
+        return "keys " + ", ".join(names[:20]) + (" …" if len(names) > 20 else "")
+    if isinstance(value, list):
+        return f"a list of {len(value)}"
+    return type(value).__name__
+
+
+def describe_answer(data):
+    """The shape of a Garmin answer (field names, list lengths, value types), never its values."""
+    if data is None:
+        return "an empty answer"
+    if isinstance(data, list):
+        first = next((item for item in data if item is not None), None)
+        return f"a list of {len(data)}" + (f"; first item has {_keys(first)}" if first is not None else "")
+    if isinstance(data, dict):
+        return f"an object with {_keys(data)}"
+    return f"a {type(data).__name__}"
+
+
+def describe_error(error):
+    text = " ".join(str(getattr(error, "text", "") or "").split())[:160]
+    return f"HTTP {error.status}" + (f": {text}" if text else "")
+
+
 # ---- the link -------------------------------------------------------------------
 
 class GarminLink:
@@ -474,6 +502,7 @@ class GarminLink:
         self.lock = threading.Lock()
         # Data Garmin keeps but doesn't list for the Personal API: kind -> working candidate, or False once refused.
         self.details, self.profile_name, self.battery_chunks = {}, None, None
+        self.probes = {}  # what Garmin answered when each kind of 15-minute data was first tried, for the status
         # Request pacing. Background downloads space requests out and wait out Garmin's rate limit
         # ("patient"); a sync someone is waiting on uses a short gap and reports the limit at once.
         self.sleep, self.gap, self.patient, self.last_request = time.sleep, QUICK_GAP, False, 0.0
@@ -511,6 +540,7 @@ class GarminLink:
                 "last_error": (account.last_error or None) if account else None,
                 "synced_days": {"count": count, "first": first.isoformat() if first else None, "last": last.isoformat() if last else None},
                 "history_download": self.job_status(),
+                "fifteen_minute_data": self.probe_report(),
             }
 
     def save_key(self, api_key):
@@ -636,8 +666,11 @@ class GarminLink:
         state = self.details.get(kind)
         if state is False:
             return None
+        attempts = []
         for index in ([state] if isinstance(state, int) else range(len(candidates))):
             path, params = candidates[index]
+            request = path.replace(self.profile_name, "{displayName}") if self.profile_name else path
+            request += "?" + "&".join(f"{k}=…" for k in params) if params else ""
             try:
                 data = self._get(path, params, renew=False)
             except ApiError as error:
@@ -645,24 +678,43 @@ class GarminLink:
                     raise
                 if isinstance(state, int):
                     return None  # it has worked before: this day just has nothing
+                attempts.append({"request": request, "answer": describe_error(error)})
                 continue
             if valid(data):
                 self.details[kind] = index
+                if not isinstance(state, int):
+                    self._probed(kind, "available", attempts + [{"request": request, "answer": describe_answer(data)}])
                 return data
             if isinstance(state, int):
                 return None
+            attempts.append({"request": request, "answer": describe_answer(data) + " (not the expected shape)"})
         self.details[kind] = False
+        self._probed(kind, "not available", attempts)
         return None
+
+    def _probed(self, kind, result, attempts):
+        self.probes[kind] = {"result": result, "checked_at": utcnow().isoformat(), "attempts": attempts}
+
+    def probe_report(self):
+        """What Garmin said when steps, stress and Body Battery every 15 minutes were first asked for since the server
+        started. Shapes only (field names, list lengths), never values."""
+        report = {kind: self.probes.get(kind, {"result": "not tried since the server started"})
+                  for kind in ("steps", "stress", "body_battery", "display_name")}
+        return report
 
     def _display_name(self):
         if self.profile_name is None:
+            request = "/userprofile-service/userprofile/settings"
             try:
-                settings = self._get("/userprofile-service/userprofile/settings")
+                settings = self._get(request)
             except ApiError as error:
                 if error.status in (0, 429):
                     raise
-                settings = None
+                settings, answer = None, describe_error(error)
+            else:
+                answer = describe_answer(settings)
             self.profile_name = str((settings or {}).get("displayName") or "") if isinstance(settings, dict) else ""
+            self._probed("display_name", "found" if self.profile_name else "not found", [{"request": request, "answer": answer}])
         return self.profile_name
 
     def _stress_detail(self, iso):
@@ -686,10 +738,19 @@ class GarminLink:
         if self.battery_chunks is not False:
             reports = self._optional(warnings, "Body Battery", path, {**params, "chunks": 1440 // SLOT_MINUTES})
             listed = [r for r in reports or [] if isinstance(r, dict)]
-            if any(r.get("bodyBatteryValuesArray") for r in listed):
+            sample = next((r for r in listed if r.get("bodyBatteryValuesArray")), None)
+            if sample is not None:
+                rows = sample["bodyBatteryValuesArray"]
+                first = rows[0] if isinstance(rows, list) and rows else None
+                answer = (f"{describe_answer(sample)}; {len(rows) if isinstance(rows, list) else 0} readings on {sample.get('date')}, "
+                          f"rows like [{', '.join(type(v).__name__ for v in first) if isinstance(first, list) else type(first).__name__}]")
+                attempt = [{"request": path + "?startDate=…&endDate=…&chunks=96", "answer": answer}]
                 if any(battery_readings(r) for r in listed):
+                    if self.battery_chunks is None:
+                        self._probed("body_battery", "available", attempt)
                     self.battery_chunks = True
                 else:
+                    self._probed("body_battery", "not readable, using the plain report", attempt)
                     self.battery_chunks, reports = False, None
         if reports is None:
             reports = self._optional(warnings, "Body Battery", path, params)
