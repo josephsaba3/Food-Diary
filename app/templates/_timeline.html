@@ -1,4 +1,4 @@
-{# One day's heart rate and Body Battery in 15-minute slots. Rendered into the Health page and served alone to swap days. #}
+{# One day's heart rate, Body Battery and stress in 15-minute slots. Rendered into the Health page and served alone to swap days. #}
 {% set t = tl %}
 <section class="timeline-section" id="timeline" data-day="{{ t.iso }}" aria-labelledby="timeline-heading">
   <div class="section-heading health-heading"><h2 id="timeline-heading">Through the day</h2><span class="small muted">{{ t.long }}</span></div>
@@ -35,18 +35,37 @@
       </div>
       {{ axis() }}
     </div>
+    {% if t.show_stress %}
+    <div class="hchart">
+      <div class="chead"><h3>Stress</h3><p class="cval">{% if t.summary.stress is not none %}{{ t.summary.stress }}<small> avg</small>{% elif t.summary.stress_periods %}{{ t.summary.stress_periods }}{% else %}<span class="muted no-reading">No periods</span>{% endif %}</p></div>
+      {% if t.summary.stress_peak %}<p class="small muted tsub">{{ t.summary.stress_peak }}{% if t.summary.stress_periods %} · {{ t.summary.stress_periods }}{% endif %}</p>
+      {% else %}<p class="small muted tsub">Shaded where Garmin says stress drained or rest recharged Body Battery. Garmin doesn’t share 15-minute stress levels for this day.</p>{% endif %}
+      <div class="plot tplot" role="img" aria-label="Stress through the day{% if t.summary.stress is not none %}, average {{ t.summary.stress }}{% endif %}{% if t.summary.stress_periods %}, {{ t.summary.stress_periods }}{% endif %}">
+        <div class="gl" data-pos="bottom:75%"><span>75 high</span></div><div class="gl" data-pos="bottom:25%"><span>25 rest</span></div>
+        <div class="base"></div>
+        {% for pd in t.periods %}<span class="tperiod {{ pd.kind }}" data-pos="left:{{ '%.3f'|format(pd.left) }}%;width:{{ '%.3f'|format(pd.width) }}%" title="{{ pd.label }}"></span>{% endfor %}
+        {{ overlays() }}
+        {% if t.stress_bars %}<svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true">{% for b in t.stress_bars %}<rect class="sbar {{ b.band }}" x="{{ b.x }}" y="{{ b.y }}" width="12" height="{{ b.h }}"/>{% endfor %}</svg>{% endif %}
+      </div>
+      {{ axis() }}
+    </div>
+    {% endif %}
   </div>
   <p class="small muted chart-key tkey">
     <span class="key"><i class="key-hr"></i>Average, with the slot’s lowest–highest</span>
     {% if t.spans %}<span class="key"><i class="key-span"></i>Workout</span>{% endif %}
+    {% if t.stress_bars %}<span class="key"><i class="key-stress"></i>Stress: rest 0–25, low, medium, high 76–100</span>{% endif %}
+    {% if t.periods|selectattr('kind', 'equalto', 'stress')|list %}<span class="key"><i class="key-stress-period"></i>Stress period</span>{% endif %}
+    {% if t.periods|selectattr('kind', 'equalto', 'recovery')|list %}<span class="key"><i class="key-recovery"></i>Recovery period</span>{% endif %}
     {% if t.meals %}<span class="key"><i class="key-meal"></i>Meal: {% for m in t.meals %}{{ m.label }}{{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
   </p>
+  {% if t.periods %}<ul class="period-list small">{% for pd in t.periods %}<li><i class="{{ pd.kind }}" aria-hidden="true"></i>{{ pd.label }}</li>{% endfor %}</ul>{% endif %}
   <details class="slot-details">
     <summary>Every 15 minutes</summary>
     <div class="table-wrap">
       <table class="log-table slot-table">
-        <thead><tr><th scope="col">Time</th><th scope="col">Heart rate</th><th scope="col">Lowest–highest</th><th scope="col">Body Battery</th></tr></thead>
-        <tbody>{% for s in t.slots %}<tr><td>{{ s.time }}</td><td>{{ s.hr ~ ' bpm' if s.hr is defined else '–' }}</td><td>{{ s.hr_min ~ '–' ~ s.hr_max if s.hr_min is defined else '–' }}</td><td>{{ s.body_battery if s.body_battery is defined else '–' }}</td></tr>{% endfor %}</tbody>
+        <thead><tr><th scope="col">Time</th><th scope="col">Heart rate</th><th scope="col">Lowest–highest</th><th scope="col">Body Battery</th>{% if t.stress_bars %}<th scope="col">Stress</th><th scope="col">Highest</th>{% endif %}</tr></thead>
+        <tbody>{% for s in t.slots %}<tr><td>{{ s.time }}</td><td>{{ s.hr ~ ' bpm' if s.hr is defined else '–' }}</td><td>{{ s.hr_min ~ '–' ~ s.hr_max if s.hr_min is defined else '–' }}</td><td>{{ s.body_battery if s.body_battery is defined else '–' }}</td>{% if t.stress_bars %}<td>{{ s.stress if s.stress is defined else '–' }}</td><td>{{ s.stress_max if s.stress_max is defined else '–' }}</td>{% endif %}</tr>{% endfor %}</tbody>
       </table>
     </div>
   </details>

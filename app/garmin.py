@@ -288,10 +288,11 @@ def _number(value, low, high):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high else None
 
 
-def build_timeline(day, heart=None, battery=None, tz=timezone.utc):
-    """Fold Garmin's 2-minute heart rate and Body Battery readings into 15-minute slots of the watch's local day.
+def build_timeline(day, heart=None, battery=None, tz=timezone.utc, stress=None):
+    """Fold Garmin's heart rate, Body Battery and stress readings into 15-minute slots of the watch's local day.
 
-    Each slot has the average, lowest and highest heart rate and the last Body Battery reading in it.
+    Each slot has the average, lowest and highest heart rate, the last Body Battery reading and the average
+    and highest stress level (0-100; Garmin's negative 'no score' readings are skipped) in it.
     Slots with no readings are left out.
     """
     slots = {}
@@ -302,7 +303,7 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc):
         local = clock(moment)
         if local.date() != day:
             return None
-        return slots.setdefault((local.hour * 60 + local.minute) // SLOT_MINUTES, {"hr": [], "bb": []})
+        return slots.setdefault((local.hour * 60 + local.minute) // SLOT_MINUTES, {"hr": [], "bb": [], "stress": []})
 
     if isinstance(heart, dict):
         clock = local_clock(heart, tz)
@@ -329,10 +330,18 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc):
             target = slot(moment, clock)
             if target is not None:
                 target["bb"].append(level)
+    if isinstance(stress, dict):
+        clock = local_clock(stress, tz)
+        for row, named in value_rows(stress, "stressValuesArray", "stressValueDescriptorsDTOList", "index", "key"):
+            stamp = named.get("timestamp", row[0] if row else None)
+            level = _number(named.get("stressLevel", row[1] if len(row) > 1 else None), 0, 100)
+            target = slot(utc_moment(stamp), clock) if level is not None else None
+            if target is not None:
+                target["stress"].append(level)
     out = []
     for index in sorted(slots):
-        hr, bb = slots[index]["hr"], slots[index]["bb"]
-        if not hr and not bb:
+        hr, bb, levels = slots[index]["hr"], slots[index]["bb"], slots[index]["stress"]
+        if not hr and not bb and not levels:
             continue
         minutes = index * SLOT_MINUTES
         entry = {"time": f"{minutes // 60:02d}:{minutes % 60:02d}"}
@@ -340,8 +349,39 @@ def build_timeline(day, heart=None, battery=None, tz=timezone.utc):
             entry.update(hr=round(sum(hr) / len(hr)), hr_min=round(min(hr)), hr_max=round(max(hr)))
         if bb:
             entry["body_battery"] = round(bb[-1])
+        if levels:
+            entry.update(stress=round(sum(levels) / len(levels)), stress_max=round(max(levels)))
         out.append(entry)
     return out
+
+
+def battery_events(day, battery, tz=timezone.utc):
+    """Garmin's timed Body Battery events (stress, recovery, activity, sleep, nap) that fall on the day, in local time."""
+    events = []
+    start_of_day = datetime.combine(day, datetime.min.time())
+    end_of_day = start_of_day + timedelta(days=1)
+
+    def clock(moment):
+        return "24:00" if moment >= end_of_day else moment.strftime("%H:%M")
+
+    found = battery.get("bodyBatteryActivityEvent") if isinstance(battery, dict) else None
+    for event in found if isinstance(found, list) else []:
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get("eventType") or "").lower()
+        start = utc_moment(event.get("eventStartTimeGmt"))
+        length = _number(event.get("durationInMilliseconds"), 0, 2 * 86400000)
+        if not kind or start is None or not length:
+            continue
+        offset = _number(event.get("timezoneOffset"), -16 * 3600000, 16 * 3600000)
+        local = (start + timedelta(milliseconds=offset)).replace(tzinfo=None) if offset is not None else start.astimezone(tz).replace(tzinfo=None)
+        finish = local + timedelta(milliseconds=length)
+        if finish <= start_of_day or local >= end_of_day:
+            continue
+        events.append(prune({"type": kind, "start": clock(max(local, start_of_day)), "end": clock(min(finish, end_of_day)),
+                             "body_battery_impact": event.get("bodyBatteryImpact"),
+                             "feedback": event.get("shortFeedback")}))
+    return sorted(events, key=lambda e: e["start"])
 
 # ---- reading the cache ----------------------------------------------------------
 
@@ -386,9 +426,14 @@ def health_timeline(session, day, start=None, end=None):
         slots = [s for s in slots if s["time"] >= start]
     if end:
         slots = [s for s in slots if s["time"] <= end]
+    events = json.loads(row.events or "[]") if row else []
+    if start:
+        events = [e for e in events if e["end"] > start]
+    if end:
+        events = [e for e in events if e["start"] <= end]
     return {"date": day.isoformat(), "available": row is not None,
             "synced_at": row.synced_at.isoformat() if row else None,
-            "interval_minutes": SLOT_MINUTES, "slots": slots}
+            "interval_minutes": SLOT_MINUTES, "slots": slots, "events": events}
 
 # ---- the link -------------------------------------------------------------------
 
@@ -399,6 +444,7 @@ class GarminLink:
         key = hashlib.sha256(b"food-diary/garmin-tokens/" + settings.session_secret.encode()).digest()
         self.fernet = Fernet(base64.urlsafe_b64encode(key))
         self.lock = threading.Lock()
+        self.stress_supported = None  # unknown until Garmin answers a dailyStress request
 
     def encrypt(self, value):
         return self.fernet.encrypt(value.encode()).decode()
@@ -523,6 +569,28 @@ class GarminLink:
                 warnings.append(f"{label} unavailable (HTTP {error.status})")
             return None
 
+    def _stress_detail(self, iso):
+        """Stress levels through the day, if Garmin serves them to a Personal API key.
+
+        dailyStress isn't in the Personal API's published list, so it is tried once per process; any refusal
+        (other than a network failure or rate limit) means stop asking. A day without readings after it has
+        worked is just an empty day.
+        """
+        if getattr(self, "stress_supported", None) is False:
+            return None
+        try:
+            data = self.http.get(self._token(), f"/wellness-service/wellness/dailyStress/{iso}")
+        except ApiError as error:
+            if error.status in (0, 429):
+                raise
+            if not (self.stress_supported and error.status in (204, 404)):
+                self.stress_supported = False
+            return None
+        if isinstance(data, dict) and isinstance(data.get("stressValuesArray"), list):
+            self.stress_supported = True
+            return data
+        return None
+
     def _sync(self, start, end, on_day=None):
         warnings, synced, activities_synced, stopped = [], 0, None, None
         try:
@@ -552,7 +620,9 @@ class GarminLink:
                         on_day()
                     continue
                 heart = self._optional(warnings, f"{iso}: heart rate", "/wellness-service/wellness/dailyHeartRate", {"date": iso})
-                slots = build_timeline(day, heart, battery_by_day.get(iso), tz)
+                stress = self._stress_detail(iso)
+                slots = build_timeline(day, heart, battery_by_day.get(iso), tz, stress)
+                events = battery_events(day, battery_by_day.get(iso), tz)
                 vo2 = vo2_by_day.get(iso)
                 summary = summarize_day(stats if isinstance(stats, dict) else None, sleep if isinstance(sleep, dict) else None,
                                         hrv if isinstance(hrv, dict) else None, None, [vo2] if vo2 else None)
@@ -560,8 +630,9 @@ class GarminLink:
                             "vo2max": vo2})
                 with self.sessions.begin() as db:
                     db.merge(HealthDay(day=day, summary=json.dumps(summary), raw=json.dumps(raw), synced_at=utcnow()))
-                    if slots:
-                        db.merge(HealthTimeline(day=day, slots=json.dumps(slots, separators=(",", ":")), synced_at=utcnow()))
+                    if slots or events:
+                        db.merge(HealthTimeline(day=day, slots=json.dumps(slots, separators=(",", ":")),
+                                                events=json.dumps(events, separators=(",", ":")), synced_at=utcnow()))
                     else:
                         db.execute(delete(HealthTimeline).where(HealthTimeline.day == day))
                 synced += 1

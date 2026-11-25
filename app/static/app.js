@@ -285,6 +285,7 @@ function bindTimeline(section) {
     else {
       if (slot.hr != null) parts.push(`${slot.hr} bpm avg (${slot.hr_min}–${slot.hr_max})`);
       if (slot.body_battery != null) parts.push(`Body Battery ${slot.body_battery}`);
+      if (slot.stress != null) parts.push(`stress ${slot.stress}${slot.stress_max > slot.stress ? ` (peak ${slot.stress_max})` : ""}`);
     }
     readout.textContent = parts.join(" · ");
     readout.classList.add("on");

@@ -178,8 +178,9 @@ def create_app(settings=None, garmin_http=None):
             garmin=status, garmin_connected=status["connected"], tl=tl, limited="limiting" in (status["last_error"] or "")))
 
     def timeline_view(db, day):
-        slots = garmin.health_timeline(db, day)["slots"]
-        return health_view.timeline(day, slots, garmin.activities_between(db, day, day), diary.get_day(db, day)["meals"])
+        stored = garmin.health_timeline(db, day)
+        return health_view.timeline(day, stored["slots"], garmin.activities_between(db, day, day),
+                                    diary.get_day(db, day)["meals"], stored["events"])
 
     @app.get("/health/timeline", dependencies=[Depends(security.require_user)])
     def health_timeline_fragment(request: Request, day: date):

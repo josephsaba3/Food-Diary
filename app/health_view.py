@@ -238,8 +238,16 @@ def _runs(points):
     return runs
 
 
-def timeline(day, slots, activities=(), meals=None):
-    """Geometry for the 15-minute heart rate and Body Battery charts of one day (SVG viewBox 0 0 1440 100)."""
+STRESS_BANDS = ((25, "rest"), (50, "low"), (75, "medium"), (100, "high"))  # Garmin's own stress ranges
+EVENT_NAMES = {"stress": "Stress", "recovery": "Recovery"}
+
+
+def stress_band(level):
+    return next(name for top, name in STRESS_BANDS if level <= top)
+
+
+def timeline(day, slots, activities=(), meals=None, events=()):
+    """Geometry for the 15-minute heart rate, Body Battery and stress charts of one day (SVG viewBox 0 0 1440 100)."""
     def x(minute):
         return minute + 7.5  # centre of the 15-minute slot
 
@@ -294,6 +302,23 @@ def timeline(day, slots, activities=(), meals=None):
         spans.append({"left": start / DAY_MINUTES * 100, "width": max(0.4, (end - start) / DAY_MINUTES * 100),
                       "label": f"{name}, {_clock(start)}–{_clock(end % DAY_MINUTES)}"})
 
+    stress = [(m, s["stress"], s.get("stress_max", s["stress"])) for m, s in rows if s.get("stress") is not None]
+    stress_bars = [{"x": m + 1.5, "y": 100 - level, "h": max(level, 1.5), "band": stress_band(level),
+                    "label": f"{_clock(m)} stress {level}"} for m, level, _ in stress]
+    periods = []
+    for e in events or ():
+        start, end = _minutes(e.get("start")), _minutes(e.get("end"))
+        if e.get("type") not in EVENT_NAMES or start is None or end is None or end <= start:
+            continue
+        impact = e.get("body_battery_impact")
+        label = f"{EVENT_NAMES[e['type']]}, {e['start']}–{e['end']}"
+        if isinstance(impact, (int, float)):
+            label += f", Body Battery {'+' if impact > 0 else '−' if impact < 0 else ''}{abs(impact)}"
+        periods.append({"kind": e["type"], "left": start / DAY_MINUTES * 100,
+                        "width": max(0.4, (end - start) / DAY_MINUTES * 100), "label": label})
+    stress_minutes = sum(_minutes(e["end"]) - _minutes(e["start"]) for e in events or ()
+                         if e.get("type") == "stress" and _minutes(e.get("start")) is not None and _minutes(e.get("end")) is not None)
+
     marks = []
     for category, meal in (meals or {}).items():
         at = _minutes(meal.get("time") or "")
@@ -312,8 +337,18 @@ def timeline(day, slots, activities=(), meals=None):
         "bb_range": (lambda hi, lo: f"High {hi[1]} at {_clock(hi[0])} · low {lo[1]} at {_clock(lo[0])}")(
             max(battery, key=lambda b: b[1]), min(battery, key=lambda b: b[1])) if battery else None,
     }
+    stress_peak = max(stress, key=lambda st: st[2]) if stress else None
+    summary.update({
+        "stress": round(sum(st[1] for st in stress) / len(stress)) if stress else None,
+        "stress_peak": f"Peak {stress_peak[2]} at {_clock(stress_peak[0])}" if stress_peak else None,
+        "stress_periods": (f"{sum(1 for p in periods if p['kind'] == 'stress')} stress "
+                           f"{'period' if sum(1 for p in periods if p['kind'] == 'stress') == 1 else 'periods'}, "
+                           f"{stress_minutes // 60}h {stress_minutes % 60:02d}m") if stress_minutes else None,
+    })
     return {
-        "iso": day.isoformat(), "long": long(day), "has_data": bool(slots),
+        "iso": day.isoformat(), "long": long(day), "has_data": bool(slots) or bool(periods),
+        "stress_bars": stress_bars, "periods": periods,
+        "show_stress": bool(stress_bars or periods),
         "slots": slots, "summary": summary,
         "hr_band": hr_band, "hr_line": hr_line, "hr_lines": hr_lines,
         "bb_line": bb_line, "bb_area": bb_area,

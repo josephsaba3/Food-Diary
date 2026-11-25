@@ -73,8 +73,10 @@ class HealthActivity(Base):
 
 
 class HealthTimeline(Base):
-    """One Garmin day in 15-minute slots (heart rate, Body Battery) as JSON, keyed by the watch's local day."""
+    """One Garmin day in 15-minute slots (heart rate, Body Battery, stress when Garmin shares it) as JSON,
+    plus the timed Body Battery events (stress, recovery...), keyed by the watch's local day."""
     __tablename__ = "health_timelines"
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     slots: Mapped[str] = mapped_column(Text)
+    events: Mapped[str] = mapped_column(Text, default="[]")
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
