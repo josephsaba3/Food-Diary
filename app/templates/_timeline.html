@@ -17,12 +17,14 @@
   {% macro axis() %}<div class="xl" aria-hidden="true">{% for l in t.axis %}<span class="align-{{ l.align }}" data-pos="left:{{ '%.2f'|format(l.left) }}%">{{ l.text }}</span>{% endfor %}</div>{% endmacro %}
   {% macro bars(items) %}<svg class="tsvg" viewBox="0 0 1440 100" preserveAspectRatio="none" aria-hidden="true">{% for b in items %}<rect class="sbar {{ b.band or 'steps' }}" x="{{ b.x }}" y="{{ '%.2f'|format(b.y) }}" width="12" height="{{ '%.2f'|format(b.h) }}"/>{% endfor %}</svg>{% endmacro %}
   {% macro value(text, unit) %}{% if text is not none %}{{ text }}{% if unit %}<small> {{ unit }}</small>{% endif %}{% else %}<span class="muted no-reading">No readings</span>{% endif %}{% endmacro %}
+  {% set signed_in = garmin.account.linked if garmin is defined and garmin.account is defined else false %}
+  {% set detail_note %}{% if signed_in %}Not synced every 15 minutes for this day yet.{% else %}Your API key only gives the day’s figure. <a href="/settings#garmin-account">Sign in to your Garmin account</a> for every 15 minutes.{% endif %}{% endset %}
   <p class="small muted t-readout" aria-live="polite">Point at or tap a chart to read a 15-minute slot.</p>
   <div class="charts tcharts" data-slots='{{ t.slots|tojson }}'>
     {% set c = t.steps %}
     <div class="hchart" data-metric="steps">
       <div class="chead"><h3>Steps</h3><p class="cval">{{ value(c.value, 'steps') }}</p></div>
-      <p class="small muted tsub">{% if c.bars %}{{ c.sub or 'No steps recorded' }}{% else %}Garmin only shares the day’s total for steps.{% endif %}</p>
+      <p class="small muted tsub">{% if c.bars %}{{ c.sub or 'No steps recorded' }}{% else %}{{ detail_note }}{% endif %}</p>
       <div class="plot tplot" role="img" aria-label="Steps through the day{% if c.value %}, {{ c.value }} in all{% endif %}">
         {% if c.bars %}{% for g in c.lines %}<div class="gl" data-pos="bottom:{{ '%.2f'|format(g.bottom) }}%"><span>{{ g.label }}</span></div>{% endfor %}{% endif %}
         <div class="base"></div>
@@ -47,7 +49,7 @@
     {% set c = t.stress %}
     <div class="hchart" data-metric="stress">
       <div class="chead"><h3>Stress</h3><p class="cval">{{ value(c.value, 'avg') }}</p></div>
-      <p class="small muted tsub">{% if c.bars %}{{ c.sub }}{% elif c.periods %}{{ c.sub }}. Garmin only shares stress levels for the whole day.{% else %}Garmin only shares stress levels for the whole day.{% endif %}</p>
+      <p class="small muted tsub">{% if c.bars %}{{ c.sub }}{% elif c.periods %}{{ c.sub }}. {{ detail_note }}{% else %}{{ detail_note }}{% endif %}</p>
       <div class="plot tplot" role="img" aria-label="Stress through the day{% if c.value is not none %}, average {{ c.value }}{% endif %}{% if c.sub %}, {{ c.sub }}{% endif %}">
         <div class="gl" data-pos="bottom:75%"><span>75 high</span></div><div class="gl" data-pos="bottom:25%"><span>25 rest</span></div>
         <div class="base"></div>

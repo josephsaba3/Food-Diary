@@ -52,6 +52,11 @@ class GarminAccount(Base):
     connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str] = mapped_column(Text, default="")
+    # Optional Garmin account sign-in for data the Personal API doesn't serve (steps and stress every 15 minutes):
+    # Garmin's sign-in tokens, Fernet-encrypted. The password itself is never stored.
+    account_tokens: Mapped[str | None] = mapped_column(Text)
+    account_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    account_error: Mapped[str] = mapped_column(Text, default="")
 
 
 class HealthDay(Base):

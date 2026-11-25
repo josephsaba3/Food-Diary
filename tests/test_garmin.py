@@ -12,6 +12,8 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from garminconnect import GarminConnectAuthenticationError, GarminConnectTooManyRequestsError
+
 from app.garmin import ApiError, battery_events, build_timeline, summarize_activity, summarize_day
 from app.main import create_app
 from app.models import GarminAccount
@@ -97,8 +99,6 @@ class FakeGarmin:
     def __init__(self):
         self.valid_key, self.issued, self.revoked, self.fail = KEY, [], set(), None
         self.activities, self.calls, self.wrapped_sleep, self.empty_days = None, [], True, set()
-        self.serves_stress = False  # dailyStress isn't in the Personal API's published list
-        self.serves_steps = False   # nor is the 15-minute steps chart
         self.chunks_unreadable = False  # Body Battery with chunks=96 answers in a shape the parser can't read
 
     def exchange(self, api_key):
@@ -125,12 +125,6 @@ class FakeGarmin:
             return HRV
         if path.startswith("/metrics-service/metrics/maxmet/daily/"):
             raise ApiError(404)
-        if path.startswith("/wellness-service/wellness/dailyStress/") and self.serves_stress:
-            return stress_day(path.rsplit("/", 1)[1])
-        if path == "/userprofile-service/userprofile/settings":
-            return {"displayName": "watch-owner", "id": 1}
-        if path == "/wellness-service/wellness/dailySummaryChart/watch-owner" and self.serves_steps:
-            return steps_day(params["date"])
         if path == "/wellness-service/wellness/dailyHeartRate":
             return heart_day(params["date"])
         if path == "/wellness-service/wellness/bodyBattery/reports/daily":
@@ -149,19 +143,89 @@ class FakeGarmin:
         raise ApiError(404)
 
 
+class FakeSignIn:
+    """Stands in for the garminconnect library's Garmin client: sign-in with MFA, saved tokens, steps and stress."""
+    PASSWORD, CODE = "right-horse-battery", "123456"
+
+    def __init__(self):
+        self.mfa, self.revoked, self.limited, self.rotate = False, False, 0, False
+        self.calls, self.issued = [], 0
+
+    def factory(self, **values):
+        return FakeAccountClient(self, **values)
+
+
+class FakeAccountClient:
+    def __init__(self, garmin, email=None, password=None, return_on_mfa=False):
+        self.garmin, self.email, self.password, self.tokens, self.display_name = garmin, email, password, None, None
+        self.client = self  # the library keeps its tokens on .client
+
+    def _issue(self):
+        self.garmin.issued += 1
+        self.tokens = json.dumps({"di_token": f"token-{self.garmin.issued}", "di_refresh_token": "refresh"})
+        self.display_name = "watch-owner"
+
+    def login(self, tokenstore=None):
+        self.garmin.calls.append("login")
+        if tokenstore:
+            if self.garmin.revoked:
+                raise GarminConnectAuthenticationError("401")
+            self.tokens, self.display_name = tokenstore, "watch-owner"
+            return None, None
+        if self.password != FakeSignIn.PASSWORD:
+            raise GarminConnectAuthenticationError("Authentication failed (401 Unauthorized).")
+        if self.garmin.mfa:
+            return "needs_mfa", {"cookies": {"session": "pending"}}
+        self._issue()
+        return None, None
+
+    def resume_login(self, state, code):
+        assert state == {"cookies": {"session": "pending"}}
+        if code != FakeSignIn.CODE:
+            raise GarminConnectAuthenticationError("Invalid MFA code")
+        self._issue()
+        return None, None
+
+    def dumps(self):
+        if self.garmin.rotate:  # the library refreshed its token during the sync
+            self.tokens = json.dumps({"di_token": "token-refreshed", "di_refresh_token": "refresh-2"})
+        return self.tokens
+
+    def _data(self, name, value):
+        self.garmin.calls.append(name)
+        if self.garmin.limited:
+            self.garmin.limited -= 1
+            raise GarminConnectTooManyRequestsError("Too many requests")
+        if self.garmin.revoked:
+            raise GarminConnectAuthenticationError("401")
+        return value
+
+    def get_steps_data(self, cdate):
+        return self._data("steps", steps_day(cdate))
+
+    def get_stress_data(self, cdate):
+        return self._data("stress", stress_day(cdate))
+
+
 @pytest.fixture
 def account():
     return FakeGarmin()
 
 
 @pytest.fixture
-def app(tmp_path, monkeypatch, account):
+def signin():
+    return FakeSignIn()
+
+
+@pytest.fixture
+def app(tmp_path, monkeypatch, account, signin):
     url = "sqlite:///" + (tmp_path / "diary.db").as_posix()
     monkeypatch.setenv("DATABASE_URL", url)
     command.upgrade(Config("alembic.ini"), "head")
     app = create_app(Settings(url, "a-private-test-password", "s" * 40, "http://localhost:8000"), garmin_http=account)
     app.state.garmin.slept = []  # pacing and back-off are recorded, not waited for
     app.state.garmin.sleep = app.state.garmin.slept.append
+    app.state.garmin.account_factory = signin.factory
     return app
 
 
@@ -427,8 +491,8 @@ def test_one_day_shows_every_metric_every_15_minutes_and_longer_periods_day_by_d
     assert [m for m in ("steps", "hr", "stress", "bb") if f'data-metric="{m}"' in page] == ["steps", "hr", "stress", "bb"]
     assert "Peak 119 bpm at 07:45 · average 90" in page and "resting 49" in page and "66 → 51" in page
     # Steps and stress levels aren't shared by this account: the day's figures show, with a note.
-    assert "11,234<small> steps" in page and "Garmin only shares the day’s total for steps." in page
-    assert "1 stress period, 0h 55m. Garmin only shares stress levels for the whole day." in page
+    assert "11,234<small> steps" in page and "Your API key only gives the day’s figure." in page
+    assert '1 stress period, 0h 55m. Your API key only gives the day’s figure. <a href="/settings#garmin-account">' in page
     assert 'title="Breakfast 06:40"' in page and 'title="Morning Run, 06:15–06:46"' in page
     assert "<td>06:15</td><td>71 bpm</td><td>68–74</td><td>61</td>" in page
     # Longer periods chart day by day, and each day links to its 15-minute view.
@@ -455,36 +519,6 @@ def test_one_day_shows_every_metric_every_15_minutes_and_longer_periods_day_by_d
     assert call(day=str(day), start_time="6pm")["isError"]
     missing = call(day=str(day - timedelta(days=3)))
     assert not (missing.get("structuredContent") or json.loads(missing["content"][0]["text"]))["available"]
-
-
-def test_steps_every_15_minutes_when_garmin_serves_them(client, app, account):
-    client.post("/api/garmin/key", json={"api_key": KEY})
-    day = today() - timedelta(days=1)
-    chart_calls = lambda: [c[0] for c in account.calls if "dailySummaryChart" in c[0]]
-    # Refused: both forms of the request are tried once, then never again.
-    client.post("/api/garmin/sync", json={"days": 3})
-    assert app.state.garmin.details["steps"] is False and len(chart_calls()) == 2
-    # The status and Settings say what Garmin answered, without the display name or any values.
-    probes = client.get("/api/garmin").json()["fifteen_minute_data"]
-    assert probes["steps"]["result"] == "not available" and probes["display_name"]["result"] == "found"
-    assert [a["request"] for a in probes["steps"]["attempts"]] == ["/wellness-service/wellness/dailySummaryChart/{displayName}?date=…",
-                                                                   "/wellness-service/wellness/dailySummaryChart?date=…"]
-    assert [a["answer"] for a in probes["steps"]["attempts"]] == ["HTTP 404", "HTTP 404"]
-    assert probes["stress"]["result"] == "not available" and probes["body_battery"]["result"] == "available"
-    assert "rows like [int, str, int, int]" in probes["body_battery"]["attempts"][0]["answer"]
-    settings = client.get("/settings").text
-    assert "15-minute data from Garmin" in settings and "watch-owner" not in settings and "{displayName}" in settings
-    # Served (with the display name from the profile): steps land in the slots and the chart.
-    app.state.garmin.details.pop("steps"); account.serves_steps = True; account.calls.clear()
-    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
-    assert chart_calls() == ["/wellness-service/wellness/dailySummaryChart/watch-owner"]
-    assert client.get("/api/garmin").json()["fifteen_minute_data"]["steps"] == {
-        "result": "available", "checked_at": ANY,
-        "attempts": [{"request": "/wellness-service/wellness/dailySummaryChart/{displayName}?date=…",
-                      "answer": "a list of 8; first item has keys endGMT, primaryActivityLevel, startGMT, steps"}]}
-    page = client.get(f"/health?start={day}&end={day}").text
-    assert 'class="sbar steps"' in page and "Busiest 15 minutes 800 at 07:45" in page
-    assert "<td>06:15</td><td>200</td><td>71 bpm</td>" in page
 
 
 def test_body_battery_asks_for_15_minute_values_and_falls_back(client, app, account):
@@ -540,28 +574,73 @@ def test_stress_levels_and_body_battery_events():
     assert battery_events(date.fromisoformat(day), {"bodyBatteryActivityEvent": [{"eventType": "STRESS"}, "x"]}) == []
 
 
-def test_stress_detail_is_tried_once_and_used_when_garmin_serves_it(client, app, account):
+def test_garmin_account_sign_in_with_code_brings_steps_and_stress(client, app, account, signin):
+    from app.models import AuthRecord, GarminAccount, HealthTimeline
+    login_body = {"email": "me@example.com", "password": FakeSignIn.PASSWORD}
+    assert "Personal API key first" in client.post("/api/garmin/account/login", json=login_body).json()["detail"]
     client.post("/api/garmin/key", json={"api_key": KEY})
-    day = today() - timedelta(days=1)
-    stress_calls = lambda: [c for c in account.calls if c[0].startswith("/wellness-service/wellness/dailyStress/")]
-    # Not served: asked once, then left alone; the sync carries on and Body Battery events still show stress.
-    assert client.post("/api/garmin/sync", json={"days": 3}).json()["warnings"] == []
-    assert len(stress_calls()) == 1 and app.state.garmin.details["stress"] is False
+    day = today() - timedelta(days=3)
+    # Days downloaded with the API key alone: steps and stress are daily figures.
+    client.post("/api/garmin/history", json={"days": 7})
+    wait_for_job(app)
     page = client.get(f"/health?start={day}&end={day}").text
-    assert "1 stress period, 0h 55m" in page and "Garmin only shares stress levels for the whole day" in page
-    assert 'title="Stress, 14:10–15:05, Body Battery −6"' in page and "<th scope=\"col\">Stress</th>" not in page.split("slot-table")[1]
-    # Served: levels land in the slots, the chart and Claude's timeline.
-    app.state.garmin.details.pop("stress"); account.serves_stress = True
-    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
-    assert app.state.garmin.details["stress"] == 0
-    page = client.get(f"/health?start={day}&end={day}").text
-    assert "Peak 77 at 14:45 · 1 stress period, 0h 55m" in page and 'class="sbar medium"' in page and 'class="sbar low"' in page
-    assert "<td>14:00</td><td>–</td><td>–</td><td>26 (peak 32)</td><td>–</td>" in page
+    assert 'href="/settings#garmin-account">Sign in to your Garmin account</a>' in page and 'class="sbar steps"' not in page
+    assert "Sign in to Garmin" in client.get("/settings").text
+    # A wrong password is refused; a right one asks for Garmin's code, which finishes the sign-in.
+    wrong = client.post("/api/garmin/account/login", json={**login_body, "password": "nope"})
+    assert wrong.status_code == 400 and "didn’t accept" in wrong.json()["detail"]
+    signin.mfa = True
+    assert client.post("/api/garmin/account/login", json=login_body).json() == {"needs_mfa": True}
+    assert client.post("/api/garmin/account/mfa", json={"code": "000000"}).status_code == 400
+    assert client.post("/api/garmin/account/mfa", json={"code": " 123 456 "}).json() == {"linked": True}
+    assert "expired" in client.post("/api/garmin/account/mfa", json={"code": "123456"}).json()["detail"]
     with app.state.sessions() as db:
-        timeline = __import__("app.garmin", fromlist=["x"]).health_timeline(db, day, "14:00", "14:30")
-    assert [s["stress"] for s in timeline["slots"]] == [26, 41, 56]
-    assert [e["type"] for e in timeline["events"]] == ["stress"]
-    # A day without stress readings once it has worked doesn't switch it off.
-    account.serves_stress = False
-    client.post("/api/garmin/sync", json={"start": str(day), "end": str(day)})
-    assert app.state.garmin.details["stress"] == 0
+        stored = db.get(GarminAccount, 1)
+        assert "token-1" not in stored.account_tokens and "token-1" in app.state.garmin.decrypt(stored.account_tokens)
+        assert db.query(AuthRecord).filter_by(kind="garmin-mfa").count() == 0
+        everything = json.dumps([str(v) for row in db.query(GarminAccount).all() for v in vars(row).values()])
+        assert FakeSignIn.PASSWORD not in everything
+    status = client.get("/api/garmin").json()
+    assert status["account"]["linked"] and status["account"]["error"] is None
+    # Downloading again re-fetches those days with steps and stress every 15 minutes.
+    app.state.garmin.account_client = None  # as after a restart: sign in from the saved tokens
+    signin.rotate = True
+    client.post("/api/garmin/history", json={"days": 7})
+    job = wait_for_job(app)
+    assert job["skipped_days"] == 0 and job["days_synced"] == 7
+    with app.state.sessions() as db:
+        assert {t.version for t in db.query(HealthTimeline).all()} == {3}
+        # Tokens Garmin refreshed during the sync are saved for next time.
+        assert "token-refreshed" in app.state.garmin.decrypt(db.get(GarminAccount, 1).account_tokens)
+    page = client.get(f"/health?start={day}&end={day}").text
+    assert 'class="sbar steps"' in page and "Busiest 15 minutes 800 at 07:45" in page and 'class="sbar medium"' in page
+    assert "<td>06:15</td><td>200</td><td>71 bpm</td>" in page
+    probes = client.get("/api/garmin").json()["fifteen_minute_data"]
+    assert probes["steps"]["result"] == "available" and probes["stress"]["result"] == "available"
+    settings = client.get("/settings").text
+    assert "Signed in to your Garmin account since" in settings and "Sign out of Garmin account" in settings
+    # Signing out keeps what was synced.
+    assert client.post("/api/garmin/account/unlink").json() == {"linked": False}
+    assert not client.get("/api/garmin").json()["account"]["linked"]
+    assert 'class="sbar steps"' in client.get(f"/health?start={day}&end={day}").text
+
+
+def test_garmin_account_rate_limits_and_sign_outs(client, app, account, signin):
+    client.post("/api/garmin/key", json={"api_key": KEY})
+    client.post("/api/garmin/account/login", json={"email": "me@example.com", "password": FakeSignIn.PASSWORD})
+    # Garmin limits the account for two requests: a background download waits it out like any other limit.
+    signin.limited = 2
+    client.post("/api/garmin/history", json={"days": 2})
+    job = wait_for_job(app)
+    assert job["state"] == "done" and job["waits"] == 2 and (signin.calls.count("stress"), signin.calls.count("steps")) == (4, 2)
+    # Garmin signs the diary out: the sync carries on with the API key and says what to do.
+    signin.revoked, app.state.garmin.account_client = True, None
+    result = client.post("/api/garmin/sync", json={"start": str(today()), "end": str(today())}).json()
+    assert result["days_synced"] == 1 and result["stopped_early"] is None
+    status = client.get("/api/garmin").json()
+    assert "signed the diary out" in status["account"]["error"]
+    assert "signed the diary out" in client.get("/settings").text
+    # Too many sign-in attempts from this browser are refused before reaching Garmin.
+    for _ in range(4):
+        client.post("/api/garmin/account/login", json={"email": "me@example.com", "password": "nope"})
+    assert client.post("/api/garmin/account/login", json={"email": "me@example.com", "password": "nope"}).status_code == 429

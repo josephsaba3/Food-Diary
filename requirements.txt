@@ -11,3 +11,7 @@ tzdata==2026.4
 mcp==1.30.0
 requests==2.34.2
 cryptography==50.0.1
+# Optional Garmin account sign-in (steps and stress every 15 minutes); ua-generator and curl_cffi pinned for it.
+garminconnect==0.3.20
+curl_cffi==0.17.0
+ua-generator==2.1.8

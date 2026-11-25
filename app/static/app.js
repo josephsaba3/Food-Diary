@@ -202,6 +202,37 @@ document.querySelectorAll(".garmin-key-form").forEach(form => form.addEventListe
   event.preventDefault();
   garminPost("/api/garmin/key", formBody(form), event.submitter, () => location.reload());
 }));
+// Garmin account sign-in: email and password, then a code if Garmin asks for one.
+async function accountPost(url, form, button, done) {
+  const status = $("#garmin-account-status");
+  button.disabled = true; status.textContent = "Signing in to Garmin…";
+  try { done(await api(url, {method:"POST", body:JSON.stringify(formBody(form))})); }
+  catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+}
+const accountSignedIn = () => {
+  $("#garmin-account-status").textContent = "Signed in. Downloading the last 30 days again to add steps and stress…";
+  startHistory({days:30}, null, $("#garmin-status"), () => location.reload());
+};
+$("#garmin-account-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  accountPost("/api/garmin/account/login", form, event.submitter, result => {
+    form.elements.password.value = "";
+    if (result.needs_mfa) {
+      form.hidden = true; $("#garmin-mfa-form").hidden = false; $("#garmin-code").focus();
+      $("#garmin-account-status").textContent = "";
+    } else accountSignedIn();
+  });
+});
+$("#garmin-mfa-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  accountPost("/api/garmin/account/mfa", event.currentTarget, event.submitter, accountSignedIn);
+});
+$("#garmin-account-unlink")?.addEventListener("click", event => {
+  if (!confirm("Sign out of your Garmin account? Steps and stress already synced stay; new days get daily totals only.")) return;
+  garminPost("/api/garmin/account/unlink", {}, event.target, () => location.reload());
+});
 // Long Garmin downloads run on the server; poll until they finish.
 async function watchHistory(statusEl, onDone) {
   for (;;) {

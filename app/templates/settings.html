@@ -13,10 +13,32 @@
     {% if garmin.last_error %}<p class="error">{{ garmin.last_error }}</p>{% endif %}
     <form id="garmin-history-form" class="inline-form" data-running="{{ 'true' if garmin.history_download.state == 'running' else 'false' }}"><label for="garmin-days">Download the last</label><select id="garmin-days" name="days"><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="182" selected>6 months</option><option value="365">1 year</option><option value="731">2 years</option></select><button class="button primary" type="submit">Download</button></form>
     <p class="small muted">Longer downloads keep running in the background, a few minutes per month of history, a week at a time so Garmin doesn’t limit it. New days also sync automatically every few hours.</p>
+    {% set acct = garmin.account %}
+    <div class="garmin-account" id="garmin-account">
+      <h3>Steps and stress every 15 minutes</h3>
+      {% if acct.linked %}
+      <p class="small">Signed in to your Garmin account{% if acct.linked_at %} since {{ acct.linked_at|localtime }}{% endif %}. Steps and stress levels every 15 minutes come from it; everything else still comes from your API key.</p>
+      {% if acct.error %}<p class="error">{{ acct.error }}</p>{% endif %}
+      <button class="button secondary" id="garmin-account-unlink" type="button">Sign out of Garmin account</button>
+      {% else %}
+      <p class="small muted">Garmin’s Personal API only gives daily totals for these. Signing in with your Garmin Connect account gets them every 15 minutes, for past days too. This uses Garmin’s own sign-in the way open-source Garmin tools do: it isn’t supported by Garmin and may stop working without notice. Your password goes to Garmin once and isn’t stored; the diary keeps Garmin’s sign-in token, encrypted.</p>
+      <form class="stack-form" id="garmin-account-form" autocomplete="on">
+        <label for="garmin-email">Garmin Connect email</label><input id="garmin-email" name="email" type="email" autocomplete="username" spellcheck="false" required>
+        <label for="garmin-password">Password</label><input id="garmin-password" name="password" type="password" autocomplete="current-password" required>
+        <button class="button primary" type="submit">Sign in to Garmin</button>
+      </form>
+      <form class="stack-form" id="garmin-mfa-form" hidden>
+        <label for="garmin-code">Code from Garmin</label><input id="garmin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{4,12}" required>
+        <p class="small muted">Garmin sent a code by email or text. It works for 10 minutes.</p>
+        <button class="button primary" type="submit">Finish signing in</button>
+      </form>
+      {% endif %}
+      <p id="garmin-account-status" role="status" class="small"></p>
+    </div>
     <details class="token-details" id="garmin-detail-check"><summary>15-minute data from Garmin</summary>
-      <p class="small muted">What Garmin answered when the diary first asked for each kind of 15-minute data since the server last started. Only the shape of each answer is shown.</p>
+      <p class="small muted">What Garmin answered when the diary first fetched each kind of 15-minute data since the server last started. Only the shape of each answer is shown.</p>
       <dl class="detail-check small">
-        {% for kind, label in (("steps", "Steps"), ("stress", "Stress levels"), ("body_battery", "Body Battery"), ("display_name", "Garmin display name")) %}
+        {% for kind, label in (("steps", "Steps"), ("stress", "Stress levels"), ("body_battery", "Body Battery")) %}
         {% set probe = garmin.fifteen_minute_data[kind] %}
         <dt>{{ label }}</dt><dd><strong>{{ probe.result|capitalize }}</strong>{% for a in probe.attempts or [] %}<br><code>{{ a.request }}</code> → {{ a.answer }}{% endfor %}</dd>
         {% endfor %}
