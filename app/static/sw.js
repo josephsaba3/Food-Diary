@@ -9,12 +9,13 @@ self.addEventListener("fetch", event => {
   event.respondWith(fetch(event.request).catch(() => new Response(offline, {headers: {"Content-Type": "text/html; charset=utf-8"}})));
 });
 
-// Stress alerts arrive as Web Push messages: {title, body, url, tag}.
+// Stress alerts arrive as Web Push messages: {title, body, url, tag}. The badge is the small status-bar icon on
+// Android: white on transparent, since only its shape is used (without it Chrome shows a bell).
 self.addEventListener("push", event => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch {}
   event.waitUntil(self.registration.showNotification(data.title || "Food diary", {
-    body: data.body || "", tag: data.tag, renotify: Boolean(data.tag), icon: "/static/icon-192.png", data: {url: data.url || "/"},
+    body: data.body || "", tag: data.tag, renotify: Boolean(data.tag), icon: "/static/icon-192.png", badge: "/static/badge-96.png", data: {url: data.url || "/"},
   }));
 });
 self.addEventListener("notificationclick", event => {
