@@ -86,3 +86,29 @@ class HealthTimeline(Base):
     events: Mapped[str] = mapped_column(Text, default="[]")
     version: Mapped[int] = mapped_column(Integer, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PushSubscription(Base):
+    """A phone or browser that asked for alerts: its Web Push endpoint and the keys to encrypt messages for it."""
+    __tablename__ = "push_subscriptions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(100))
+    device: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str] = mapped_column(Text, default="")
+
+
+class StressAlert(Base):
+    """A high-stress stretch an alert was sent for, so each stretch is only announced once."""
+    __tablename__ = "stress_alerts"
+    __table_args__ = (UniqueConstraint("day", "start_minute", name="uq_stress_alert_day_start"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    start_minute: Mapped[int] = mapped_column(Integer)
+    minutes: Mapped[int] = mapped_column(Integer)
+    average: Mapped[int | None] = mapped_column(Integer)
+    peak: Mapped[int | None] = mapped_column(Integer)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

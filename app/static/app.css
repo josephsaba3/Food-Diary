@@ -8,7 +8,7 @@
   --line:#E3E7E5; --line-soft:#EEF1EF; --line-strong:#D5DBD8;
   --green:#1E6B4F; --green-dark:#154E3A; --green-soft:#E8F1ED;
   --amber:#B45309; --amber-ink:#8A4A0B; --amber-deep:#7A3F06; --amber-text:#5E3206; --amber-soft:#FDF5EC; --amber-tint:#FDF0E1; --amber-line:#EBC9A3; --amber-dash:#D9B48A;
-  --blue:#2D5B9A; --blue-deep:#1D3F6E; --blue-soft:#EEF3FA; --chart-rest:#9DB4D6; --chart-up:#D98A3D;
+  --blue:#2D5B9A; --blue-deep:#1D3F6E; --blue-soft:#EEF3FA; --chart-rest:#9DB4D6; --chart-up:#D98A3D; --chart-high:#B83A1E;
   --error:#A1322D;
   --radius:14px; --radius-lg:16px; --radius-sm:10px;
   --gutter:20px;
@@ -116,6 +116,7 @@ input[aria-invalid=true]{border-color:var(--error)}
 .tile.outline .tile-value small{font-size:14px}
 .tile-sub{font-size:12px;color:var(--muted)}
 .tile-sub.good{color:var(--green);font-weight:600}
+.tile-sub.warn{color:var(--chart-high);font-weight:600}
 .meter{height:6px;border-radius:3px;background:var(--green-soft);overflow:hidden}
 .meter i{display:block;height:100%;background:var(--green);border-radius:3px}
 a.tile:hover{filter:brightness(.98)}
@@ -304,6 +305,8 @@ a.wk-row:hover{background:var(--softer)}
 .sbar{stroke:none}
 .sbar.rest,.sbar.low-rest{fill:var(--chart-rest)}
 .sbar.up{fill:var(--chart-up)}
+.sbar.high{fill:var(--chart-high)}
+.hi-run{position:absolute;top:0;height:4px;border-radius:2px;background:var(--chart-high);z-index:1}
 .sbar.steps{fill:var(--green)}
 .tperiod{position:absolute;top:0;bottom:0;pointer-events:none}
 .tperiod.stress{background:rgba(217,138,61,.16)}
@@ -317,6 +320,7 @@ a.wk-row:hover{background:var(--softer)}
 .meal-tag[aria-pressed=false]{background:var(--soft);color:var(--ink)}
 .meal-tag.edge-start{transform:none}.meal-tag.edge-end{transform:translateX(-100%)}
 .peak{position:absolute;transform:translate(-50%,-6px);font-size:12px;font-weight:700;color:var(--blue);pointer-events:none;z-index:2}
+.peak.stress-peak{color:var(--chart-high)}.peak.stress-peak::before{background:var(--chart-high)}
 .peak::before{content:"";position:absolute;left:50%;bottom:-6px;width:7px;height:7px;margin-left:-3.5px;border-radius:50%;background:var(--blue);transform:translateY(50%)}
 .tcursor{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--ink);pointer-events:none;z-index:3}
 .xl{position:relative;height:18px;margin-top:6px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -328,7 +332,7 @@ a.wk-row:hover{background:var(--softer)}
 .key-rest{background:var(--chart-rest)}.key-up{background:var(--chart-up)}.key-steps{background:var(--green)}
 .key-hr{background:var(--blue);height:2px!important;width:14px!important}
 .key-meal{border-left:1.5px dashed var(--faint);width:0!important;height:12px!important;border-radius:0!important}
-.key-span{background:rgba(30,107,79,.14)}.key-stress-period{background:rgba(217,138,61,.3)}.key-recovery{background:rgba(157,180,214,.45)}
+.key-span{background:rgba(30,107,79,.14)}.key-high{background:var(--chart-high)}.key-stress-period{background:rgba(217,138,61,.3)}.key-recovery{background:rgba(157,180,214,.45)}
 .window-card{margin-top:20px;background:var(--soft);border-radius:var(--radius-lg);padding:16px;display:flex;flex-direction:column;gap:10px}
 .window-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
 .window-head b{font-size:15px;font-weight:650}
@@ -337,6 +341,7 @@ a.wk-row:hover{background:var(--softer)}
 .window-stats div{display:flex;flex-direction:column;gap:2px}
 .window-stats span{font-size:12px;color:var(--muted)}
 .window-stats b{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+.window-stats b.high{color:var(--chart-high)}.window-stats b.high small{font-size:12px;font-weight:600}
 .window-stats b.amber{font-size:15px;font-weight:600;color:var(--amber-ink)}
 .window-stats b.green{font-size:15px;font-weight:600;color:var(--green)}
 .window-note{font-size:13px;color:var(--muted);line-height:1.45}
@@ -425,6 +430,7 @@ a.wk-row:hover{background:var(--softer)}
 .settings-section{margin-top:28px;padding-top:22px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
 .settings-section h2{font-size:17px;font-weight:650}
 .settings-section h3{font-size:15px;font-weight:650}
+.alert-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
 .settings-section label{font-size:13px;font-weight:600;color:var(--muted)}
 .settings-section a{color:var(--green);font-weight:500}
 .copy-field{display:flex;gap:8px}

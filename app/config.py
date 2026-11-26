@@ -33,6 +33,17 @@ def garmin_sync_hours_from_env():
     return hours
 
 
+def int_from_env(name, default, low, high, hint, allow_zero=False):
+    raw = os.getenv(name, str(default)).strip() or str(default)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a whole number. {hint}")
+    if not (low <= value <= high or (allow_zero and value == 0)):
+        raise RuntimeError(f"{name} must be between {low} and {high}. {hint}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -44,6 +55,11 @@ class Settings:
     extra_redirect_uris: tuple[str, ...] = ()
     # Hours between automatic Garmin syncs of yesterday and today; 0 turns it off.
     garmin_sync_hours: float = 0
+    # High-stress phone alerts: stress at or above this level (Garmin's high range starts at 76) for this many minutes,
+    # checked this often while a phone has alerts on (0 turns the checks off).
+    stress_alert_level: int = 76
+    stress_alert_minutes: int = 30
+    stress_check_minutes: int = 0
 
     @classmethod
     def from_env(cls):
@@ -57,6 +73,9 @@ class Settings:
             production=production,
             extra_redirect_uris=tuple(x.strip() for x in os.getenv("OAUTH_REDIRECT_URIS", "").split(",") if x.strip()),
             garmin_sync_hours=garmin_sync_hours_from_env(),
+            stress_alert_level=int_from_env("STRESS_ALERT_LEVEL", 76, 26, 100, "Garmin's high stress range starts at 76."),
+            stress_alert_minutes=int_from_env("STRESS_ALERT_MINUTES", 30, 15, 240, "Use a multiple of 15, like 30."),
+            stress_check_minutes=int_from_env("STRESS_CHECK_MINUTES", 30, 15, 720, "Use 0 to turn stress checks off.", allow_zero=True),
         )
         if len(settings.password) < 12 or len(settings.session_secret) < 32:
             raise RuntimeError("Set APP_PASSWORD (12+ characters) and SESSION_SECRET (32+ characters) in .env or Railway Variables.")

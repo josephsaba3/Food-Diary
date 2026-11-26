@@ -229,6 +229,7 @@ def build(health_days, start, end, today):
 DAY_MINUTES = 1440
 JOIN_BODY_BATTERY = 180  # Body Battery is a level, so readings up to 3 hours apart are joined by the line
 STRESS_BANDS = ((25, "rest"), (50, "low"), (75, "medium"), (100, "high"))  # Garmin's own stress ranges
+HIGH_STRESS = 76  # where Garmin's "high" stress range starts
 EVENT_NAMES = {"stress": "Stress", "recovery": "Recovery"}
 
 
@@ -260,6 +261,24 @@ def _runs(points, join=15):
     if current:
         runs.append(current)
     return runs
+
+
+def high_stress_runs(slots, level=HIGH_STRESS):
+    """Stretches of back-to-back 15-minute slots whose average stress is `level` or more, oldest first:
+    [{"start", "end" (minutes of the day), "minutes", "peak", "average"}]."""
+    rows = sorted((_minutes(s.get("time")), s) for s in slots or ()
+                  if _minutes(s.get("time")) is not None and isinstance(s.get("stress"), (int, float)))
+    runs = []
+    for run in _runs([(m, s) for m, s in rows if s["stress"] >= level]):
+        levels = [s["stress"] for _, s in run]
+        runs.append({"start": run[0][0], "end": run[-1][0] + 15, "minutes": len(run) * 15,
+                     "peak": max(s.get("stress_max", s["stress"]) for _, s in run),
+                     "average": round(sum(levels) / len(levels))})
+    return runs
+
+
+def _hm(minutes):
+    return f"{minutes // 60}h {minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
 
 
 def _x(minute):
@@ -350,12 +369,18 @@ def timeline(day, slots, activities=(), meals=None, events=(), summary=None):
     stress_bars = _bars(stress, 100)
     for bar in stress_bars:
         bar["band"] = stress_band(bar["value"])
+    high = high_stress_runs(slots)
+    high_minutes = sum(r["minutes"] for r in high)
+    high_text = f"high for {_hm(high_minutes)}" if high else None
     stress_chart = {
-        "bars": stress_bars, "periods": periods,
+        "bars": stress_bars, "periods": periods, "high_minutes": high_minutes,
+        "high": [{"left": r["start"] / DAY_MINUTES * 100, "width": r["minutes"] / DAY_MINUTES * 100,
+                  "label": f"High stress {_clock(r['start'])}–{_clock(r['end'] % DAY_MINUTES)}, average {r['average']}, peak {r['peak']}"}
+                 for r in high],
         # Garmin's own daily average, so it matches the figure above; the slots' average only if it's missing.
         "value": day_stress if day_stress is not None else (round(sum(v for _, v in stress) / len(stress)) if stress else None),
         "sub": " · ".join(t for t in (f"Peak {stress_peak[1]} at {_clock(stress_peak[0])}" if stress_peak else None,
-                                      period_text) if t) or None,
+                                      high_text, period_text) if t) or None,
     }
 
     # Body Battery -----------------------------------------------------------
@@ -429,7 +454,9 @@ def day_tiles(summary):
         tiles.append({"label": "Resting heart rate", "value": hr["resting"], "unit": "bpm",
                       "sub": f"Day range {hr['min']}–{hr['max']}" if hr.get("min") is not None and hr.get("max") is not None else None})
     if stress.get("average") is not None:
-        tiles.append({"label": "Stress", "value": stress["average"], "unit": "avg", "sub": _stress_word(stress)})
+        high = stress.get("high_minutes") or 0
+        sub = " · ".join(t for t in (_stress_word(stress), f"{_hm(high)} high" if high else None) if t) or None
+        tiles.append({"label": "Stress", "value": stress["average"], "unit": "avg", "sub": sub, "warn": high >= 30})
     if bb.get("highest") is not None:
         tiles.append({"label": "Body Battery", "value": bb["highest"], "unit": "high",
                       "sub": f"Low of {bb['lowest']}" if bb.get("lowest") is not None else None})
@@ -501,8 +528,9 @@ def day_chart(day, slots, activities=(), meals=None, events=(), summary=None, no
         return {**item, "left": at(a), "width": max(0.6, (b - a) / span * 100)}
 
     for bar in t["stress"]["bars"]:
-        bar["band"] = "rest" if bar["value"] <= 25 else "up"
+        bar["band"] = "rest" if bar["value"] <= 25 else "high" if bar["value"] >= HIGH_STRESS else "up"
     periods = [remap(p) for p in t["stress"]["periods"] if inside(p["left"], p["width"])]
+    high_runs = [remap(r) for r in t["stress"]["high"] if inside(r["left"], r["width"])]
     spans = [remap(s) for s in t["spans"] if inside(s["left"], s["width"])]
 
     rows = {_minutes(s["time"]): s for s in slots if _minutes(s.get("time")) is not None}
@@ -525,6 +553,7 @@ def day_chart(day, slots, activities=(), meals=None, events=(), summary=None, no
         windows.append({
             "key": key, "label": label, "time": _clock(m), "minute": m, "left": at(min(max(m, start), end)),
             "inside": start <= m <= end, "peak_hr": max(hrs) if hrs else None, "peak_stress": max(stresses) if stresses else None,
+            "high_stress": bool(stresses) and max(stresses) >= HIGH_STRESS,
             "steps": steps if window else None, "status": status,
             "symptoms": "Not recorded" if status == "unrecorded" else "None" if status == "none" else "Reported",
             "note": " ".join(note), "rest": resting})
@@ -543,6 +572,14 @@ def day_chart(day, slots, activities=(), meals=None, events=(), summary=None, no
         if heart:
             pm, pv = max(heart, key=lambda h: h[1])
             peak = {"left": at(pm + 7.5), "bottom": pct(pv, t["hr"]["lo"], t["hr"]["hi"]), "value": pv, "time": _clock(pm)}
+    # Flag the most stressed 15 minutes on the chart when it reached Garmin's high range, like the heart rate peak.
+    stress_peak = None
+    shown = [b for b in t["stress"]["bars"] if start <= b["minute"] < end]
+    if shown:
+        top = max(shown, key=lambda b: b["value"])
+        if top["value"] >= HIGH_STRESS:
+            stress_peak = {"left": at(top["minute"] + 7.5), "bottom": top["value"], "value": top["value"], "time": _clock(top["minute"])}
     return {**t, "start": start, "end": end, "span": span, "periods": periods, "spans": spans, "axis": axis,
+            "high_runs": high_runs, "stress_peak": stress_peak,
             "windows": windows, "selected": selected["key"] if selected else None, "peak": peak,
             "tiles": day_tiles(summary), "details": watch_details(summary, activities), "window_label": f"{_clock(start)}–{_clock(end % DAY_MINUTES) if end < DAY_MINUTES else '24:00'}"}

@@ -80,3 +80,21 @@ class GarminSync(BaseModel):
     start: date | None = None
     end: date | None = None
     days: int = Field(default=1, ge=1, le=92)
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=80, max_length=200, pattern=r"^[A-Za-z0-9_-]+=*$")
+    auth: str = Field(min_length=16, max_length=100, pattern=r"^[A-Za-z0-9_-]+=*$")
+
+
+class PushSubscribe(BaseModel):
+    """What the browser's PushSubscription.toJSON() gives, plus a short device label."""
+    model_config = ConfigDict(extra="ignore")
+    endpoint: str = Field(min_length=12, max_length=2000, pattern=r"^https://[^\s/]+/\S*$")
+    keys: PushKeys
+    device: str = Field(default="", max_length=120)
+
+
+class PushEndpoint(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    endpoint: str = Field(min_length=12, max_length=2000)

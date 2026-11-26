@@ -443,7 +443,7 @@ function bindDayChart(section) {
     if (!slot) parts.push("no readings");
     else {
       if (slot.hr != null) parts.push(`${slot.hr} bpm (${slot.hr_min}–${slot.hr_max})`);
-      if (slot.stress != null) parts.push(`stress ${slot.stress}`);
+      if (slot.stress != null) parts.push(`stress ${slot.stress}${slot.stress >= 76 ? " (high)" : ""}`);
       if (slot.steps != null) parts.push(`${slot.steps.toLocaleString("en-AU")} steps`);
       if (slot.body_battery != null) parts.push(`Body Battery ${slot.body_battery}`);
     }
@@ -572,5 +572,64 @@ if ($(".health-layout-root") && $("[data-health-sync]")) {
   // Pick up a download started elsewhere (Settings, or another tab).
   api("/api/garmin/history").then(job => { if (job.state === "running") watchHistory($("#health-sync-status"), () => location.reload()); }).catch(() => {});
 }
+
+// Stress alerts: subscribe this phone to Web Push (Settings).
+(async function pushSetup() {
+  const box = $("#push-controls");
+  if (!box) return;
+  const status = $("#push-status");
+  if (!("serviceWorker" in navigator && "PushManager" in window && "Notification" in window)) {
+    const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    status.textContent = ios ? "On iPhone, add the diary to your Home Screen (Share → Add to Home Screen), open it from there, then turn alerts on here."
+                             : "This browser can’t show notifications from the diary.";
+    return;
+  }
+  const device = /Android/.test(navigator.userAgent) ? "Android phone" : /iPhone|iPad/.test(navigator.userAgent) ? "iPhone" : "Browser";
+  const key = Uint8Array.from(atob(box.dataset.key.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+  const save = sub => api("/api/push/subscribe", {method: "POST", body: JSON.stringify({...sub.toJSON(), device})});
+  let reg, sub;
+  try { reg = await navigator.serviceWorker.ready; sub = await reg.pushManager.getSubscription(); }
+  catch { status.textContent = "Couldn’t start notifications in this browser."; return; }
+  const show = message => {
+    $("#push-on").hidden = !!sub; $("#push-test").hidden = $("#push-off").hidden = !sub;
+    status.textContent = message ?? (sub ? "Alerts are on for this phone."
+      : Notification.permission === "denied" ? "Notifications are blocked for the diary. Allow them in your phone’s settings for this app, then try again." : "");
+  };
+  box.hidden = false;
+  if (sub) save(sub).catch(() => {});  // keep the diary's copy current
+  show();
+  $("#push-on").addEventListener("click", async event => {
+    event.target.disabled = true;
+    try {
+      if (await Notification.requestPermission() !== "granted") { show(); return; }
+      const options = {userVisibleOnly: true, applicationServerKey: key};
+      try { sub = await reg.pushManager.subscribe(options); }
+      catch (error) {  // an old subscription made with a different key: replace it
+        const old = await reg.pushManager.getSubscription();
+        if (!old) throw error;
+        await old.unsubscribe(); sub = await reg.pushManager.subscribe(options);
+      }
+      await save(sub);
+      show("Alerts are on for this phone. Send a test alert to check it works.");
+    } catch (error) { sub = null; show(error.message || "Couldn’t turn alerts on."); }
+    finally { event.target.disabled = false; }
+  });
+  $("#push-test").addEventListener("click", async event => {
+    event.target.disabled = true;
+    try {
+      const result = await api("/api/push/test", {method: "POST"});
+      show(result.delivered ? "Test alert sent. It should appear in a few seconds." : "No device accepted the test alert. Turn alerts off and on again.");
+    } catch (error) { show(error.message); }
+    finally { event.target.disabled = false; }
+  });
+  $("#push-off").addEventListener("click", async event => {
+    event.target.disabled = true;
+    try {
+      await api("/api/push/unsubscribe", {method: "POST", body: JSON.stringify({endpoint: sub.endpoint})});
+      await sub.unsubscribe(); sub = null; show("Alerts are off for this phone.");
+    } catch (error) { show(error.message); }
+    finally { event.target.disabled = false; }
+  });
+})();
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
