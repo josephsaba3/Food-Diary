@@ -8,3 +8,21 @@ self.addEventListener("fetch", event => {
   if (event.request.mode !== "navigate") return;
   event.respondWith(fetch(event.request).catch(() => new Response(offline, {headers: {"Content-Type": "text/html; charset=utf-8"}})));
 });
+
+// Stress alerts arrive as Web Push messages: {title, body, url, tag}.
+self.addEventListener("push", event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch {}
+  event.waitUntil(self.registration.showNotification(data.title || "Food diary", {
+    body: data.body || "", tag: data.tag, renotify: Boolean(data.tag), icon: "/static/icon-192.png", data: {url: data.url || "/"},
+  }));
+});
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  const url = new URL(event.notification.data?.url || "/", self.location.origin).href;
+  event.waitUntil(self.clients.matchAll({type: "window", includeUncontrolled: true}).then(async windows => {
+    const open = windows.find(w => new URL(w.url).origin === self.location.origin);
+    if (open) { await open.focus(); return open.navigate(url).catch(() => null); }
+    return self.clients.openWindow(url);
+  }));
+});

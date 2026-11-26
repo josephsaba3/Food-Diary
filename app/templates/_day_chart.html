@@ -5,7 +5,7 @@
   {% for x in t.tiles %}
   <div class="tile outline"><span class="tile-label">{{ x.label }}</span><span class="tile-value">{{ x.value }}{% if x.unit %} <small>{{ x.unit }}</small>{% endif %}</span>
     {% if x.meter is defined and x.meter is not none %}<span class="meter" aria-hidden="true"><i data-pos="width:{{ x.meter }}%"></i></span>{% endif %}
-    {% if x.sub %}<span class="tile-sub{{ ' good' if x.good else '' }}">{{ x.sub }}</span>{% endif %}</div>
+    {% if x.sub %}<span class="tile-sub{{ ' good' if x.good else '' }}{{ ' warn' if x.warn else '' }}">{{ x.sub }}</span>{% endif %}</div>
   {% endfor %}
 </section>
 
@@ -44,7 +44,9 @@
         {% for pd in t.periods %}<span class="tperiod {{ pd.kind }}" data-pos="left:{{ '%.3f'|format(pd.left) }}%;width:{{ '%.3f'|format(pd.width) }}%" title="{{ pd.label }}"></span>{% endfor %}
         <div class="lane-base"></div>
         {{ overlays() }}
+        {% for r in t.high_runs %}<span class="hi-run" data-pos="left:{{ '%.3f'|format(r.left) }}%;width:{{ '%.3f'|format(r.width) }}%" title="{{ r.label }}"></span>{% endfor %}
         {% if c.bars %}<svg viewBox="{{ vb }}" preserveAspectRatio="none" aria-hidden="true">{% for b in c.bars %}<rect class="sbar {{ b.band }}" x="{{ b.x }}" y="{{ '%.2f'|format(b.y) }}" width="12" height="{{ '%.2f'|format(b.h) }}"/>{% endfor %}</svg>
+        {% if t.stress_peak %}<span class="peak stress-peak" data-pos="left:{{ '%.2f'|format(t.stress_peak.left) }}%;bottom:{{ '%.2f'|format(t.stress_peak.bottom) }}%">{{ t.stress_peak.value }}</span>{% endif %}
         {% elif not t.periods %}<p class="tnone"><span>{% if signed_in %}Not synced every 15 minutes yet{% else %}Daily figure only{% endif %}</span></p>{% endif %}
       </div>
     </div>
@@ -73,7 +75,7 @@
     <div class="xl" aria-hidden="true">{% for l in t.axis %}<span class="align-{{ l.align }}" data-pos="left:{{ '%.2f'|format(l.left) }}%">{{ l.text }}</span>{% endfor %}</div>
   </div>
   <p class="chart-key">
-    <span class="key"><i class="key-rest"></i>Stress resting</span><span class="key"><i class="key-up"></i>Above rest</span>
+    <span class="key"><i class="key-rest"></i>Stress resting</span><span class="key"><i class="key-up"></i>Above rest</span>{% if t.high_runs %}<span class="key"><i class="key-high"></i>High stress (76+)</span>{% endif %}
     {% if t.windows %}<span class="key"><i class="key-meal"></i>Meal</span>{% endif %}
     {% if t.spans %}<span class="key"><i class="key-span"></i>Workout</span>{% endif %}
     {% if t.periods|selectattr('kind', 'equalto', 'stress')|list %}<span class="key"><i class="key-stress-period"></i>Stress period</span>{% endif %}
@@ -86,7 +88,7 @@
     <div class="window-head"><b>Around {{ w.label|lower }} · {{ w.time }}</b><a href="/?date={{ t.iso }}#slot-{{ w.key }}">See meal</a></div>
     <div class="window-stats">
       <div><span>Peak HR</span><b>{{ w.peak_hr if w.peak_hr is not none else '–' }}</b></div>
-      <div><span>Peak stress</span><b>{{ w.peak_stress if w.peak_stress is not none else '–' }}</b></div>
+      <div><span>Peak stress</span><b{% if w.high_stress %} class="high"{% endif %}>{{ w.peak_stress if w.peak_stress is not none else '–' }}{% if w.high_stress %}<small> high</small>{% endif %}</b></div>
       <div><span>Symptoms</span><b class="{{ 'amber' if w.status != 'none' else 'green' }}">{{ w.symptoms }}</b></div>
     </div>
     <p class="window-note">{{ w.note }}</p>

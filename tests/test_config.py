@@ -73,3 +73,15 @@ def test_local_development_keeps_sqlite_default(monkeypatch):
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert database_url_from_env() == "sqlite:///./food-diary.db"
+
+
+def test_stress_alert_settings(railway_env, monkeypatch):
+    settings = Settings.from_env()
+    assert (settings.stress_alert_level, settings.stress_alert_minutes, settings.stress_check_minutes) == (76, 30, 30)
+    monkeypatch.setenv("STRESS_CHECK_MINUTES", "0")
+    monkeypatch.setenv("STRESS_ALERT_MINUTES", "45")
+    settings = Settings.from_env()
+    assert settings.stress_check_minutes == 0 and settings.stress_alert_minutes == 45
+    monkeypatch.setenv("STRESS_CHECK_MINUTES", "5")
+    with pytest.raises(RuntimeError, match="STRESS_CHECK_MINUTES must be between 15 and 720"):
+        Settings.from_env()

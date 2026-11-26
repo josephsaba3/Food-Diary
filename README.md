@@ -44,6 +44,9 @@ SQLite is for local use only. Railway production deliberately refuses to start w
 | `TIMEZONE` | `Australia/Sydney` |
 | `FORWARDED_ALLOW_IPS` | `*` when running exclusively behind Railway's trusted proxy |
 | `GARMIN_SYNC_HOURS` | Optional. Hours between automatic Garmin syncs; default `3`, `0` turns it off |
+| `STRESS_CHECK_MINUTES` | Optional. While a phone has stress alerts on, minutes between checks of today's stress (6 am–11 pm); default `30`, minimum `15`, `0` turns alerts off |
+| `STRESS_ALERT_LEVEL` | Optional. Stress level that counts as high; default `76`, where Garmin's high range starts |
+| `STRESS_ALERT_MINUTES` | Optional. Minutes of high stress in a row before an alert; default `30` |
 
 Generate a session secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Railway supplies `PORT`; the server binds to `0.0.0.0`. Keep one app worker/replica: the login abuse limiter is per process. Postgres stores the diary, OAuth registrations and hashed connection tokens. Enable Railway database backups; the authenticated JSON export is also available in Settings.
 
@@ -89,6 +92,12 @@ It uses Garmin's official [Connect Personal API](https://developer.garmin.com/gc
 The **Health** page shows a day, week, month or 90 days, or any custom range up to 93 days. A single day has tiles for steps (against your goal), resting heart rate, stress and Body Battery, then **Your day with meals**: heart rate, stress, steps and Body Battery on one time axis over waking hours, with your meals marked; picking a meal shows what the watch measured in the two hours after it next to its symptoms. **More from your watch** lists sleep, HRV, workouts, calories, breathing and SpO2. Longer periods show averages over the days the watch was worn (a day counts as worn when it has a resting heart rate), day-by-day charts and a daily log; selecting a day opens its details. **Sync** downloads the period shown.
 
 Garmin emails you about a week before the key expires. Create a new key and paste it under **Replace API key**. Unlinking removes the key from the diary but keeps the health data already synced. To revoke the key itself, delete it in Garmin Connect. Re-syncing a day replaces its cached copy, and workouts deleted in Garmin Connect disappear at the next sync of their dates. Each day also keeps the trimmed Garmin responses, so `get_health_day` with `include_raw` can answer questions about fields the summary doesn't show. Training readiness isn't offered by the Personal API.
+
+### High stress: flags and phone alerts
+
+On a single day, stress at or above 76 (Garmin's high range) is drawn in red, each stretch of it is bracketed above the stress lane, and the most stressed 15 minutes is labelled like the heart rate peak. The stress tile shows Garmin's minutes of high stress for the day.
+
+**Settings → Stress alerts → Turn on alerts on this phone** sends a notification when the watch reads high stress for 30 minutes in a row (`STRESS_ALERT_LEVEL`, `STRESS_ALERT_MINUTES`). It uses Web Push, which needs no account or keys to set up: the signing key is derived from `SESSION_SECRET` (changing it means turning alerts on again). On Android it works in Chrome or the installed app; on iPhone the diary must be added to the Home Screen and opened from there (iOS 16.4 or later). While at least one phone has alerts on, the server syncs today from Garmin every `STRESS_CHECK_MINUTES` minutes between 6 am and 11 pm and alerts once per stretch, at most every two hours. Stress every 15 minutes needs the Garmin account sign-in; without it, alerts use Garmin's own stress periods from Body Battery. Readings only reach Garmin when the watch syncs with the Garmin Connect app, so alerts trail the watch by however long that takes.
 
 ## Import the supplied diary
 

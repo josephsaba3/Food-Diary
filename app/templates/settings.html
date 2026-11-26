@@ -61,6 +61,23 @@
     {% endif %}
     <p id="garmin-status" role="status" class="small"></p>
   </section>
+  <section class="settings-section" id="alerts"><h2>Stress alerts</h2>
+    <p>Get a notification on this phone when your watch reads high stress ({{ alerts.level }}+) for {{ alerts.minutes }} minutes or more, so you can step in before it builds.</p>
+    {% if not garmin.connected %}<p class="small">Link Garmin above first: alerts come from your watch’s stress readings.</p>
+    {% elif not garmin.account.linked %}<p class="small muted">Without the Garmin account sign-in above, alerts use Garmin’s own stress periods from Body Battery, which are coarser than stress every 15 minutes.</p>{% endif %}
+    {% if alerts.check_minutes %}
+    <p class="small muted">While alerts are on, the diary checks Garmin every {{ alerts.check_minutes }} minutes from 6 am to 11 pm. Readings only reach Garmin when your watch syncs with the Garmin Connect app, so an alert can arrive a while after the stress started. You get one alert per stretch, at most every 2 hours.</p>
+    <div class="actions" id="push-controls" data-key="{{ alerts.public_key }}" hidden>
+      <button class="btn primary" id="push-on" type="button">Turn on alerts on this phone</button>
+      <button class="btn" id="push-test" type="button" hidden>Send a test alert</button>
+      <button class="btn" id="push-off" type="button" hidden>Turn off on this phone</button>
+    </div>
+    <p id="push-status" role="status" class="small"></p>
+    {% if alerts.devices %}<p class="small muted">On for {{ alerts.devices|length }} {{ 'device' if alerts.devices|length == 1 else 'devices' }}.{% for d in alerts.devices if d.last_error %} {{ d.device or 'A device' }}: {{ d.last_error }}.{% endfor %}</p>{% endif %}
+    {% if alerts.recent %}<h3>Recent alerts</h3>
+    <ul class="alert-list small">{% for a in alerts.recent %}<li><a href="/health?period=1&amp;start={{ a.day }}&amp;end={{ a.day }}#timeline">{{ a.day }}</a> · high from {{ a.start }} for {{ a.minutes }} min{% if a.average is not none %}, average {{ a.average }}, peak {{ a.peak }}{% endif %}</li>{% endfor %}</ul>{% endif %}
+    {% else %}<p class="small muted">Stress checks are turned off on the server (<code>STRESS_CHECK_MINUTES=0</code>).</p>{% endif %}
+  </section>
   <section class="settings-section"><h2>Export your diary</h2><p>Download meals, symptoms and notes as a JSON file you can import again.</p><form action="/export" method="get" class="export-form"><div><label for="export-start">From</label><input type="date" id="export-start" name="start" value="{{ export_start }}" required></div><div><label for="export-end">To</label><input type="date" id="export-end" name="end" value="{{ today }}" required></div><button class="btn primary" type="submit">Download diary</button></form></section>
   <section class="settings-section"><h2>Import entries</h2><p>Choose a Food diary JSON file. Existing meals and notes stay as they are.</p><form id="import-form"><label for="import-file">Diary file</label><input type="file" id="import-file" accept="application/json,.json" required><button class="btn" type="submit">Import diary</button><p id="import-status" role="status" class="small"></p></form></section>
   <section class="settings-section"><h2>Session</h2><p class="muted">Dates and times use {{ timezone.replace('_', ' ') }}.</p><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Sign out</button></form></section>

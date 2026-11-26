@@ -559,7 +559,7 @@ def test_timeline_view_model():
     with_stress = health_view.timeline(date(2026, 11, 19), [{"time": "14:00", "stress": 80, "stress_max": 90}], [], {},
                                        [{"type": "stress", "start": "14:00", "end": "15:30"}, {"type": "sleep", "start": "00:00", "end": "06:00"}])
     assert [b["band"] for b in with_stress["stress"]["bars"]] == ["high"] and [p["kind"] for p in with_stress["stress"]["periods"]] == ["stress"]
-    assert with_stress["stress"]["sub"] == "Peak 90 at 14:00 · 1 stress period, 1h 30m"
+    assert with_stress["stress"]["sub"] == "Peak 90 at 14:00 · high for 15m · 1 stress period, 1h 30m"
     assert [health_view.stress_band(v) for v in (0, 25, 26, 51, 76)] == ["rest", "rest", "low", "medium", "high"]
 
 

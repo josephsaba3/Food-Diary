@@ -25,15 +25,16 @@ from .garmin import GarminError, GarminLink
 from .mcp_server import build_mcp
 from .models import AuthRecord
 from .oauth import MCPAuthorization, OAuth
+from .push import Push
 from .schemas import (CATEGORIES, Category, GarminAccountCode, GarminAccountLogin, GarminHistory, GarminKey, GarminSync,
-                      MealInput, NoteInput)
+                      MealInput, NoteInput, PushEndpoint, PushSubscribe)
 from .security import Security, local_next
 
 ROOT = Path(__file__).parent
 log = logging.getLogger("food_diary.garmin")
 
 
-def create_app(settings=None, garmin_http=None):
+def create_app(settings=None, garmin_http=None, push_http=None):
     settings = settings or Settings.from_env()
     engine = make_engine(settings.database_url)
     sessions = session_factory(engine)
@@ -44,6 +45,7 @@ def create_app(settings=None, garmin_http=None):
                                       for name in ("app.css", "app.js")}
     oauth = OAuth(settings, sessions, security, templates)
     link = GarminLink(settings, sessions, garmin_http)
+    push = Push(settings, sessions, push_http)
     templates.env.filters["hm"] = lambda minutes: f"{int(minutes) // 60}h {int(minutes) % 60:02d}m" if minutes is not None else ""
     templates.env.filters["localtime"] = lambda iso: datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.timezone)).strftime("%d %b, %-I:%M %p").lstrip("0") if iso else ""
     templates.env.filters["label"] = lambda value: str(value or "").replace("_", " ").capitalize()
@@ -65,17 +67,43 @@ def create_app(settings=None, garmin_http=None):
                 log.warning("Automatic Garmin sync failed: %s", error)
             await asyncio.sleep(settings.garmin_sync_hours * 3600)
 
+    def check_stress_now(sync=True):
+        """Bring today in from Garmin (unless a sync is already running) and alert on a new high-stress stretch."""
+        now = now_local()
+        if sync and link.connected():
+            try:
+                link.sync(now.date(), now.date())
+            except GarminError as error:  # e.g. a sync already running: check what's stored
+                log.info("Stress check sync skipped: %s", error)
+        with sessions() as db:
+            stored = garmin.health_timeline(db, now.date())
+        return push.check_stress(now.date(), stored["slots"], stored["events"], now.hour * 60 + now.minute)
+
+    async def stress_watch():
+        # While a phone has alerts on, look at today's stress every few minutes during waking hours.
+        await asyncio.sleep(90)
+        while True:
+            try:
+                if 6 <= now_local().hour < 23 and await asyncio.to_thread(push.has_subscribers):
+                    await asyncio.to_thread(check_stress_now)
+            except Exception as error:  # never let one bad check stop the loop
+                log.warning("Stress check failed: %s", error)
+            await asyncio.sleep(settings.stress_check_minutes * 60)
+
     @asynccontextmanager
     async def lifespan(app):
-        task = asyncio.create_task(garmin_auto_sync()) if settings.garmin_sync_hours > 0 else None
+        tasks = [asyncio.create_task(garmin_auto_sync())] if settings.garmin_sync_hours > 0 else []
+        if settings.stress_check_minutes > 0:
+            tasks.append(asyncio.create_task(stress_watch()))
         async with mcp.session_manager.run():
             yield
-        if task:
+        for task in tasks:
             task.cancel()
         engine.dispose()
 
     app = FastAPI(title="Food diary", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.sessions, app.state.engine, app.state.oauth, app.state.garmin = sessions, engine, oauth, link
+    app.state.push, app.state.check_stress = push, check_stress_now
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="food_diary",
         max_age=30 * 86400, same_site="lax", https_only=settings.production)
 
@@ -224,7 +252,7 @@ def create_app(settings=None, garmin_http=None):
         if redirect := require_page(request):
             return redirect
         return templates.TemplateResponse(request, "settings.html", context(request, mcp_url=oauth.resource,
-            export_start=today() - timedelta(days=30), garmin=link.status(), section="settings"))
+            export_start=today() - timedelta(days=30), garmin=link.status(), alerts=push.status(), section="settings"))
 
     @app.get("/api/days/{day}", dependencies=[Depends(security.require_user)])
     def read_day(day: date):
@@ -296,6 +324,22 @@ def create_app(settings=None, garmin_http=None):
     @app.post("/api/garmin/disconnect", dependencies=[Depends(security.check_write)])
     def garmin_disconnect():
         return link.disconnect()
+
+    @app.get("/api/push", dependencies=[Depends(security.require_user)])
+    def push_status():
+        return push.status()
+
+    @app.post("/api/push/subscribe", dependencies=[Depends(security.check_write)])
+    def push_subscribe(body: PushSubscribe):
+        return push.subscribe(body.endpoint, body.keys.p256dh, body.keys.auth, body.device)
+
+    @app.post("/api/push/unsubscribe", dependencies=[Depends(security.check_write)])
+    def push_unsubscribe(body: PushEndpoint):
+        return push.unsubscribe(body.endpoint)
+
+    @app.post("/api/push/test", dependencies=[Depends(security.check_write)])
+    def push_test():
+        return push.test()
 
     @app.get("/export", dependencies=[Depends(security.require_user)])
     def export(start: date, end: date):
