@@ -49,6 +49,7 @@
             <tbody>{% for m in d.meals %}<tr><td>{{ m.time }}</td><td><span class="slot">{{ m.slot }}</span>{{ m.food }}</td>{% if include.symptoms %}<td class="{{ 'unrecorded' if m.status == 'unrecorded' else '' }}">{{ m.symptoms }}</td>{% endif %}</tr>{% endfor %}</tbody>
           </table>
           {% endif %}
+          {% if d.water %}<p class="doc-extra"><b>Water:</b> {{ d.water }}</p>{% endif %}
           {% if d.note %}<p class="doc-extra"><b>Notes:</b> {{ d.note }}</p>{% endif %}
           {% if d.watch %}<p class="doc-extra"><b>Watch:</b> {{ d.watch }}</p>{% endif %}
         </div>

@@ -164,6 +164,22 @@ a.strip-step:hover{color:var(--ink)}
 .no-symptoms{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--green);font-weight:500}
 .empty-slot{margin:2px 0 10px;min-height:48px;border:0;border-radius:var(--radius);background:var(--softer);display:flex;align-items:center;gap:10px;padding:0 14px;color:var(--muted);font-size:15px;font-weight:500;text-align:left;width:100%}
 .empty-slot:hover{background:var(--soft);color:var(--ink)}
+.empty-wrap{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px 8px;margin:2px 0 10px}
+.empty-wrap .empty-slot{margin:0;grid-column:1;grid-row:1}
+.empty-wrap .water-row{display:contents}
+.empty-wrap .water-btn:not(.minus){grid-column:2;grid-row:1;min-height:48px;border-radius:var(--radius)}
+.empty-wrap .water-amount{grid-column:1;grid-row:2;padding-left:14px}
+.empty-wrap .water-btn.minus{grid-column:2;grid-row:2;justify-self:end}
+.empty-wrap .water-amount:not(.has-water){display:none}
+.water-row{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.water-amount{display:flex;align-items:center;gap:5px;margin-right:auto;font-size:13px;font-weight:500;color:var(--muted)}
+.water-amount.has-water{color:var(--blue)}
+.water-btn{display:flex;align-items:center;gap:3px;min-height:34px;padding:0 11px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--blue);font-size:13px;font-weight:600}
+.water-btn.minus{padding:0;width:34px;justify-content:center;color:var(--muted)}
+.water-btn:hover{background:var(--blue-soft)}
+.water-btn:active{transform:scale(.96)}
+.water-total{display:inline-flex;align-items:center;gap:4px;margin-left:6px;font-size:13px;font-weight:500;color:var(--muted);vertical-align:middle}
+.water-total.has-water{color:var(--blue)}
 .now-row{display:grid;grid-template-columns:48px minmax(0,1fr);column-gap:12px;align-items:center;margin:2px 0 12px}
 .now-time{font-size:12px;font-weight:700;color:var(--green);text-align:center;font-variant-numeric:tabular-nums}
 .now-line{display:flex;align-items:center;gap:8px}

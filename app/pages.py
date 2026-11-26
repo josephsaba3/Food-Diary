@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 
-from .models import DayNote, Meal
+from .models import DayNote, Meal, Water
 from .schemas import CATEGORIES, IMPORT_FROM
 
 SPLIT = re.compile(r"\s*(?:\n|;|,|\s\+\s)\s*")
@@ -116,7 +116,12 @@ def _minutes(hhmm):
     return int(hhmm[:2]) * 60 + int(hhmm[3:5])
 
 
-def today_view(session, day, today, now, meals, health_summary, slots):
+def water_label(ml):
+    """250 ml, 1 L, 1.25 L."""
+    return f"{ml} ml" if ml < 1000 else f"{ml / 1000:g} L"
+
+
+def today_view(session, day, today, now, meals, health_summary, slots, water=None):
     """Everything the Today page shows for one day."""
     monday = day - timedelta(days=day.weekday())
     week = _meals_between(session, monday, monday + timedelta(days=6))
@@ -132,7 +137,7 @@ def today_view(session, day, today, now, meals, health_summary, slots):
     items, last_logged = [], -1
     for key, label in CATEGORIES.items():
         meal = meals.get(key)
-        item = {"key": key, "label": label, "meal": meal}
+        item = {"key": key, "label": label, "meal": meal, "water": (water or {}).get(key, 0)}
         if meal:
             item.update(chips=food_items(meal["food"]), watch=watch_note(meal, slots, resting))
             last_logged = len(items)
@@ -146,6 +151,7 @@ def today_view(session, day, today, now, meals, health_summary, slots):
         "strip": strip, "week_start": monday, "timeline": items, "now_at": now_at, "now": now,
         "count": len(logged), "symptoms": symptoms_summary(logged),
         "steps": f"{steps:,}" if steps is not None else None,
+        "water_total": sum((water or {}).values()),
     }
 
 
@@ -199,6 +205,9 @@ def report_view(session, start, end, include, health_days):
     meals = _meals_between(session, start, end)
     notes = {n.day: n.text for n in session.scalars(select(DayNote).where(DayNote.day >= start, DayNote.day <= end)) if n.text.strip()}
     health = {h["date"]: h.get("summary") or {} for h in health_days}
+    water = {}
+    for w in session.scalars(select(Water).where(Water.day >= start, Water.day <= end, Water.ml > 0)):
+        water.setdefault(w.day, {})[w.category] = w.ml
     order = list(CATEGORIES)
     days = []
     for i in range((end - start).days + 1):
@@ -215,13 +224,16 @@ def report_view(session, start, end, include, health_days):
             if (s.get("stress") or {}).get("average") is not None:
                 parts.append(f"stress {s['stress']['average']} average")
             watch = ", ".join(parts) or None
-        if not mine and not (include.get("notes") and d in notes) and not watch:
+        drunk = water.get(d, {})
+        water_text = (f"{water_label(sum(drunk.values()))} (" + ", ".join(
+            f"{CATEGORIES[k].lower()} {water_label(drunk[k])}" for k in order if k in drunk) + ")") if drunk else None
+        if not mine and not drunk and not (include.get("notes") and d in notes) and not watch:
             continue
         days.append({"title": long_date(d), "meals": [{
             "time": m.time or "–", "slot": CATEGORIES[m.category], "food": m.food,
             "symptoms": m.symptoms if m.symptom_status == "reported" else "None" if m.symptom_status == "none" else "Not recorded",
             "status": m.symptom_status} for m in mine],
-            "note": notes.get(d) if include.get("notes") else None, "watch": watch})
+            "water": water_text, "note": notes.get(d) if include.get("notes") else None, "watch": watch})
     unrecorded = sum(1 for m in meals if m.symptom_status == "unrecorded")
     return {"start": start, "end": end, "days": days, "meal_count": len(meals), "unrecorded": unrecorded,
             "span": (end - start).days + 1,

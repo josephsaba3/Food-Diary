@@ -2,6 +2,13 @@
 {% block title %}{{ title }} · Food diary{% endblock %}
 {% block content %}
 {% set v = view %}
+{% macro water(item) %}
+<div class="water-row" data-water="{{ item.key }}" data-ml="{{ item.water }}">
+  <span class="water-amount{{ ' has-water' if item.water else '' }}">{{ icon('drop', 16) }}<span>{{ water_label(item.water) if item.water else 'Water' }}</span></span>
+  <button type="button" class="water-btn minus" data-water-step="-250" aria-label="Take 250 ml of water off {{ item.label|lower }}" {% if not item.water %}hidden{% endif %}>{{ icon('minus', 16) }}</button>
+  <button type="button" class="water-btn" data-water-step="250" aria-label="Add 250 ml of water to {{ item.label|lower }}">{{ icon('plus', 16) }}250 ml</button>
+</div>
+{% endmacro %}
 <main id="main" class="page today" data-day="{{ day.isoformat() }}">
   <header class="page-head">
     <div><p class="eyebrow">{{ date_label }}</p><h1>{{ title }}</h1></div>
@@ -29,7 +36,7 @@
 
   <section class="meals" aria-labelledby="meals-heading">
     <div class="section-title">
-      <h2 id="meals-heading">Meals &amp; drinks</h2>
+      <h2 id="meals-heading">Meals &amp; drinks <span class="water-total{{ ' has-water' if v.water_total else '' }}" id="water-total" aria-live="polite">{{ icon('drop', 16) }}<span>{{ water_label(v.water_total) if v.water_total else 'No water yet' }}</span></span></h2>
       {% if sheet.copies %}
       <details class="copy-menu">
         <summary class="link-btn">Copy from yesterday</summary>
@@ -53,12 +60,16 @@
             {% if m.symptom_status == 'reported' %}<button class="symptom-note" type="button" data-feel="{{ item.key }}"><span class="caps">Symptoms</span>{{ m.symptoms }}</button>
             {% elif m.symptom_status == 'none' %}<p class="no-symptoms">{{ icon('check', 16) }}No symptoms</p>
             {% else %}<button class="feel-btn" type="button" data-feel="{{ item.key }}">{{ icon('plus', 16) }}How did you feel after?</button>{% endif %}
+            {{ water(item) }}
           </article>
         </li>
         {% else %}
         <li class="tl-row" id="slot-{{ item.key }}">
           <div class="tl-rail"><span class="rail"></span></div>
-          <button class="empty-slot" type="button" data-add="{{ item.key }}">{{ icon('plus', 18) }}{{ item.label }}</button>
+          <div class="empty-wrap">
+            <button class="empty-slot" type="button" data-add="{{ item.key }}">{{ icon('plus', 18) }}{{ item.label }}</button>
+            {{ water(item) }}
+          </div>
         </li>
         {% endif %}
       {% endfor %}
