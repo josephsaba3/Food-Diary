@@ -27,7 +27,7 @@ from .models import AuthRecord
 from .oauth import MCPAuthorization, OAuth
 from .push import Push
 from .schemas import (CATEGORIES, Category, GarminAccountCode, GarminAccountLogin, GarminHistory, GarminKey, GarminSync,
-                      MealInput, NoteInput, PushEndpoint, PushSubscribe)
+                      MealInput, NoteInput, PushEndpoint, PushSubscribe, WaterInput)
 from .security import Security, local_next
 
 ROOT = Path(__file__).parent
@@ -52,6 +52,7 @@ def create_app(settings=None, garmin_http=None, push_http=None):
     templates.env.filters["clock"] = lambda iso: datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.timezone)).strftime("%H:%M") if iso else ""
     templates.env.globals["timedelta_7"] = timedelta(days=7)
     templates.env.globals["days_ago"] = {n: timedelta(days=n - 1) for n in (7, 14, 28)}
+    templates.env.globals["water_label"] = pages.water_label
     mcp = build_mcp(settings, sessions, link)
     mcp_app = mcp.streamable_http_app()
 
@@ -193,7 +194,8 @@ def create_app(settings=None, garmin_http=None, push_http=None):
             data = diary.get_day(db, day)
             health = garmin.health_day(db, day)
             slots = garmin.health_timeline(db, day)["slots"]
-            view = pages.today_view(db, day, today(), now_local().strftime("%H:%M"), data["meals"], health["summary"], slots)
+            view = pages.today_view(db, day, today(), now_local().strftime("%H:%M"), data["meals"], health["summary"], slots,
+                                    data["water"])
             sheet = {"day": day.isoformat(), "today": today().isoformat(), "now": now_local().strftime("%H:%M"),
                      "slots": CATEGORIES, "meals": data["meals"], "note": data["note"],
                      "suggestions": pages.suggestions(db, day, today()), "copies": pages.copy_choices(db, day)}
@@ -269,6 +271,13 @@ def create_app(settings=None, garmin_http=None, push_http=None):
         with sessions() as db:
             diary.delete_meal(db, day, category.value, version)
         return Response(status_code=204)
+
+    @app.post("/api/days/{day}/water/{category}", dependencies=[Depends(security.check_write)])
+    def add_water(day: date, category: Category, body: WaterInput):
+        if day > today():
+            raise HTTPException(400, "Choose today or an earlier day.")
+        with sessions() as db:
+            return diary.add_water(db, day, category.value, body.ml)
 
     @app.put("/api/days/{day}/notes", dependencies=[Depends(security.check_write)])
     def put_note(day: date, note: NoteInput):
@@ -349,7 +358,8 @@ def create_app(settings=None, garmin_http=None, push_http=None):
             except ValueError as error:
                 raise HTTPException(422, str(error))
         content = {"format": "food-diary-v1", "timezone": settings.timezone, "days": [
-            {"date": d["date"], "meals": list(d["meals"].values()), "notes": d["note"]["text"]} for d in days]}
+            {"date": d["date"], "meals": list(d["meals"].values()), "notes": d["note"]["text"], **({"water": d["water"]} if d["water"] else {})}
+            for d in days]}
         return Response(json.dumps(content, indent=2, ensure_ascii=False), media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="food-diary-{start}-{end}.json"'})
 

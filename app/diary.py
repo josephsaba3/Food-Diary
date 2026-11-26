@@ -1,10 +1,10 @@
 from datetime import date, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .models import DayNote, Meal, utcnow
-from .schemas import CATEGORIES, IMPORT_FROM, MealInput, NoteInput
+from .models import DayNote, Meal, Water, utcnow
+from .schemas import CATEGORIES, IMPORT_FROM, MAX_WATER_ML, MealInput, NoteInput
 
 
 class ConflictError(ValueError):
@@ -28,8 +28,36 @@ def get_day(session, day: date):
             suggestions[target] = {"date": yesterday.isoformat(), "category": source,
                                    "label": f"Import yesterday’s {source}", "food": previous[source].food}
     note = session.get(DayNote, day)
+    water = day_water(session, day)
     return {"date": day.isoformat(), "categories": CATEGORIES, "meals": meals, "suggestions": suggestions,
-            "note": {"text": note.text if note else "", "version": note.version if note else 0}}
+            "note": {"text": note.text if note else "", "version": note.version if note else 0},
+            "water": water, "water_total_ml": sum(water.values())}
+
+
+def day_water(session, day):
+    """Millilitres of water per meal slot for a day, leaving out slots with none."""
+    rows = session.scalars(select(Water).where(Water.day == day)).all()
+    return {row.category: row.ml for row in rows if row.ml > 0}
+
+
+def add_water(session, day, category, ml):
+    """Add (or with a negative amount, take away) water for one slot. Adds commute, so two quick taps in different
+    tabs both count; the slot stays between 0 and MAX_WATER_ML. Returns the slot's and the day's totals."""
+    for attempt in range(2):
+        total = Water.ml + ml
+        result = session.execute(update(Water).where(Water.day == day, Water.category == category).values(
+            ml=case((total < 0, 0), (total > MAX_WATER_ML, MAX_WATER_ML), else_=total), updated_at=utcnow()))
+        if result.rowcount == 1:
+            session.commit()
+            break
+        try:
+            session.add(Water(day=day, category=category, ml=min(max(ml, 0), MAX_WATER_ML), updated_at=utcnow()))
+            session.commit()
+            break
+        except IntegrityError:  # added at the same moment elsewhere: add to that row instead
+            session.rollback()
+    water = day_water(session, day)
+    return {"date": day.isoformat(), "category": category, "ml": water.get(category, 0), "total_ml": sum(water.values())}
 
 
 def save_meal(session, day, category, data: MealInput):

@@ -112,3 +112,12 @@ class StressAlert(Base):
     average: Mapped[int | None] = mapped_column(Integer)
     peak: Mapped[int | None] = mapped_column(Integer)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Water(Base):
+    """Water drunk with one meal slot of a day, in millilitres (added a glass at a time from the Today page)."""
+    __tablename__ = "water"
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    category: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ml: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

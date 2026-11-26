@@ -44,6 +44,23 @@ class MealInput(BaseModel):
         return self
 
 
+GLASS_ML = 250  # one tap of "+250 ml" on the Today page
+MAX_WATER_ML = 5000  # per meal slot
+
+
+class WaterInput(BaseModel):
+    """Millilitres to add to a slot's water (negative takes some away; the total never goes below 0)."""
+    model_config = ConfigDict(extra="forbid")
+    ml: int = Field(ge=-MAX_WATER_ML, le=MAX_WATER_ML)
+
+    @field_validator("ml")
+    @classmethod
+    def not_zero(cls, value):
+        if value == 0:
+            raise ValueError("Add or take away some water.")
+        return value
+
+
 class NoteInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     text: str = Field(max_length=10000)

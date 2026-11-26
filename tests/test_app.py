@@ -105,7 +105,7 @@ def test_notes_conflict_and_export_import_roundtrip(client):
     client.put("/api/days/2026-09-24/meals/lunch", json=meal("<script>alert(1)</script>"))
     exported = client.get("/export?start=2026-09-24&end=2026-09-24")
     assert exported.json()["days"][0]["notes"] == text
-    assert client.post("/api/import", json=exported.json()).json() == {"added": 0, "skipped": 1, "notes_added": 0}
+    assert client.post("/api/import", json=exported.json()).json() == {"added": 0, "skipped": 1, "notes_added": 0, "water_added": 0}
     page = client.get("/?date=2026-09-24").text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     assert '<script>alert(1)</script>' not in page
@@ -211,13 +211,16 @@ def test_mcp_protocol_and_real_tools_share_ui_database(client):
     initialized = rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "diary-test", "version": "1"}})
     assert initialized["result"]["serverInfo"]["name"] == "Food diary"
     listed = rpc("tools/list", {})["result"]["tools"]
-    assert {t["name"] for t in listed} == {"get_diary_today", "get_diary_day", "get_diary_range", "save_diary_meal", "save_diary_notes",
+    assert {t["name"] for t in listed} == {"get_diary_today", "get_diary_day", "get_diary_range", "save_diary_meal", "save_diary_notes", "add_diary_water",
         "get_garmin_status", "sync_garmin", "download_garmin_history", "get_health_day", "get_health_range", "get_health_timeline", "get_activities"}
     saved = rpc("tools/call", {"name": "save_diary_meal", "arguments": {"day": "2026-09-24", "category": "breakfast", "entry": meal("MCP oats")}})
     assert not saved["result"].get("isError"), saved
     assert client.get("/api/days/2026-09-24").json()["meals"]["breakfast"]["food"] == "MCP oats"
     stale = rpc("tools/call", {"name": "save_diary_meal", "arguments": {"day": "2026-09-24", "category": "breakfast", "entry": meal("Stale oats")}})
     assert stale["result"]["isError"]
+    water = rpc("tools/call", {"name": "add_diary_water", "arguments": {"day": "2026-09-24", "category": "breakfast", "ml": 300}})
+    assert not water["result"].get("isError"), water
+    assert client.get("/api/days/2026-09-24").json()["water"] == {"breakfast": 300}
     read = rpc("tools/call", {"name": "get_diary_day", "arguments": {"day": "2026-09-24"}})
     assert not read["result"].get("isError")
 

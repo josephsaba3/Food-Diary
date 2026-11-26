@@ -242,6 +242,26 @@ if (today) {
     finally { busy(false); }
   });
 
+  // Water: "+250 ml" on each slot. Taps are sent one after another, and the server adds them up.
+  const waterLabel = ml => ml < 1000 ? `${ml} ml` : `${+(ml / 1000).toFixed(2)} L`;
+  let waterQueue = Promise.resolve();
+  document.querySelectorAll("[data-water-step]").forEach(button => button.addEventListener("click", () => {
+    const row = button.closest("[data-water]");
+    const step = Number(button.dataset.waterStep);
+    waterQueue = waterQueue.then(async () => {
+      try {
+        const result = await api(`/api/days/${pageDay}/water/${row.dataset.water}`, {method: "POST", body: JSON.stringify({ml: step})});
+        row.dataset.ml = result.ml;
+        row.querySelector(".water-amount span").textContent = result.ml ? waterLabel(result.ml) : "Water";
+        row.querySelector(".water-amount").classList.toggle("has-water", result.ml > 0);
+        row.querySelector(".water-btn.minus").hidden = !result.ml;
+        const total = $("#water-total");
+        total.querySelector("span").textContent = result.total_ml ? waterLabel(result.total_ml) : "No water yet";
+        total.classList.toggle("has-water", result.total_ml > 0);
+      } catch (error) { toast(error.message); }
+    });
+  }));
+
   document.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => start({category: b.dataset.edit})));
   document.querySelectorAll("[data-add]").forEach(b => b.addEventListener("click", () => start({category: b.dataset.add})));
   document.querySelectorAll("[data-feel]").forEach(b => b.addEventListener("click", () => start({category: b.dataset.feel, focus: "feel"})));
@@ -309,7 +329,7 @@ $("#import-form")?.addEventListener("submit", async event => {
   try {
     if (file.size > 2000000) throw new Error("Choose a file smaller than 2 MB.");
     const result = await api("/api/import",{method:"POST",body:await file.text()});
-    $("#import-status").textContent = `${result.added} meals imported; ${result.skipped} existing meals skipped; ${result.notes_added} daily notes imported.`;
+    $("#import-status").textContent = `${result.added} meals imported; ${result.skipped} existing meals skipped; ${result.notes_added} daily notes imported${result.water_added ? `; water for ${result.water_added} meal slots imported` : ""}.`;
   } catch (error) { $("#import-status").textContent = error.message; }
   finally { button.disabled = false; }
 });
